@@ -713,7 +713,9 @@ void COM_FileBase (char *in, char *out)
 	while (s != in && *s != '.')
 		s--;
 	
-	for (s2 = s ; *s2 && *s2 != '/' ; s2--)
+	// had a bug here when in == "gfx.wad", as it does not have a slash.
+	// therefore added the check s2 != in - 1
+	for (s2 = s ; s2 != in - 1 && *s2 && *s2 != '/'; s2--)
 		;
 	
 	if (s-s2 < 2)

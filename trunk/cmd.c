@@ -165,7 +165,9 @@ void Cbuf_Execute (void)
 		{
 			i++;
 			cmd_text.cursize -= i;
-			memcpy (text, text + i, cmd_text.cursize);
+			// address sanitizer found problems with overlapping memory so use
+			// memmove instead of memcpy
+			memmove (text, text + i, cmd_text.cursize);
 		}
 
 	// execute the command line

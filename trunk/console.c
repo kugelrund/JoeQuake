@@ -434,6 +434,9 @@ void Con_DrawInput (void)
 
 	// draw it
 #ifdef GLQUAKE
+	// Draw_String expects text to be null terminated to let's make sure that is
+	// the case
+	temp[MAXCMDLINE - 1] = '\0';
 	Draw_String (size, con_vislines - (size * 2), text, true);
 #else
 	for (i=0 ; i<con_linewidth ; i++)
