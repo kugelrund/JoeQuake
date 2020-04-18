@@ -1,0 +1,140 @@
+add_executable(joequake-gl
+    adivtab.h
+    anorm_dots.h
+    anorms.h
+    asm_i386.h
+    bspfile.h
+    cdaudio.h
+    cd_linux.c
+    chase.c
+    cl_demo.c
+    client.h
+    cl_input.c
+    cl_main.c
+    cl_parse.c
+    cl_slist.c
+    cl_slist.h
+    cl_tent.c
+    cmd.c
+    cmd.h
+    common.c
+    common.h
+    console.c
+    console.h
+    crc.c
+    crc.h
+    cvar.c
+    cvar.h
+    draw.h
+    fakegl.h
+    fmod_errors.h
+    fmod.h
+    gl_decals.c
+    gl_draw.c
+    gl_fakegl.c
+    gl_mesh.c
+    gl_model.c
+    gl_model.h
+    glquake.h
+    gl_refrag.c
+    gl_rlight.c
+    gl_rmain.c
+    gl_rmisc.c
+    gl_rpart.c
+    gl_rsurf.c
+    gl_screen.c
+    gl_warp.c
+    host.c
+    host_cmd.c
+    image.c
+    image.h
+    input.h
+    iplog.c
+    iplog.h
+    jconfig.h
+    jmorecfg.h
+    keys.c
+    keys.h
+    mathlib.c
+    mathlib.h
+    menu.c
+    menu.h
+    modelgen.h
+    nehahra.c
+    nehahra.h
+    net_bsd.c
+    net_dgrm.c
+    net_dgrm.h
+    net.h
+    net_loop.c
+    net_loop.h
+    net_main.c
+    net_ser.h
+    net_udp.c
+    net_udp.h
+    net_vcr.c
+    net_vcr.h
+    pr_cmds.c
+    pr_comp.h
+    pr_edict.c
+    pr_exec.c
+    progdefs.h
+    progs.h
+    protocol.h
+    quakeasm.h
+    quakedef.h
+    quake.ico
+    render.h
+    resource.h
+    r_part.c
+    sbar.c
+    sbar.h
+    screen.h
+    security.c
+    security.h
+    server.h
+    snd_dma.c
+    snd_linux.c
+    snd_mem.c
+    snd_mixa.s
+    snd_mix.c
+    sound.h
+    spritegn.h
+    surf8.s
+    sv_main.c
+    sv_move.c
+    sv_phys.c
+    sv_user.c
+    sys.h
+    sys_linux.c
+    sys_x86.s
+    version.c
+    version.h
+    vid.h
+    vid_common_gl.c
+    vid_glx.c
+    view.c
+    view.h
+    wad.c
+    wad.h
+    winquake.h
+    worlda.s
+    world.c
+    world.h
+    zconf.h
+    zone.c
+    zone.h
+)
+
+target_compile_options(joequake-gl
+    PRIVATE -m32
+)
+target_link_options(joequake-gl
+    PRIVATE -m32
+)
+target_compile_definitions(joequake-gl
+    PRIVATE GLQUAKE
+)
+target_link_libraries(joequake-gl
+    PRIVATE GL dl m png jpeg X11 Xxf86vm Xxf86dga
+)
