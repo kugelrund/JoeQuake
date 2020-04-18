@@ -2475,7 +2475,7 @@ void R_SetupFrame (void)
 	r_cache_thrash = false;
 }
 
-__inline void MYgluPerspective (GLdouble fovy, GLdouble aspect, GLdouble zNear, GLdouble zFar)
+void MYgluPerspective (GLdouble fovy, GLdouble aspect, GLdouble zNear, GLdouble zFar)
 {
 	GLdouble	xmin, xmax, ymin, ymax;
 
