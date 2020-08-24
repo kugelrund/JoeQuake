@@ -136,5 +136,5 @@ target_compile_definitions(joequake-gl
     PRIVATE GLQUAKE
 )
 target_link_libraries(joequake-gl
-    PRIVATE GL dl m png jpeg X11 Xxf86vm Xxf86dga
+    PRIVATE GL dl m png jpeg X11 Xxf86vm Xxf86dga SDL2
 )
