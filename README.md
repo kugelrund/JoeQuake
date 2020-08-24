@@ -346,6 +346,14 @@ Turns mp3 audio compression on/off, 0 by default.
 Sets mp3 compression's bitrate, 128 by default.
 Only works if `capture_mp3` is 1 (trivial).
 
+### `capture_avi_split`
+
+Set this to the number of megabytes at which to split captured video into more
+than one AVI file. The used video capture module has a problem with files
+getting corrupted when reaching a size of over 2 gigabytes, so splitting them
+into smaller files is a good idea to avoid this corruption. Default is
+1900 megabytes. Setting to 0 disables splitting.
+
 ### `gl_externaltextures_world` and `gl_externaltextures_bmodels`
 
 Load external textures when set to "1".
@@ -505,6 +513,17 @@ If not equals to 0, overrides the monitor's refresh rate to the given value.
 
 Load external textures for menu and hud/status bar.
 1 by default.
+
+### `gl_texturemode_hud`
+
+Set texture filtering mode for HUD elements, for example health display, menu
+images and so on. Valid modes: `GL_LINEAR` and `GL_NEAREST`, `GL_LINEAR` by
+default.
+
+### `gl_texturemode_sky`
+
+Set texture filtering mode for sky textures. Valid modes: `GL_LINEAR` and
+`GL_NEAREST`, `GL_LINEAR` by default.
 
 ## New commands
 
@@ -702,7 +721,7 @@ automatically extracted and played. Works from the Demos menu too.
 NOTE: make sure the dzip binary (dzip.exe or dzip-linux, comes with the zip)
 is present in your main Quake folder.
 
-### Framerate independent physics (BETA)
+### Framerate independent physics
 
 Server and Client calculates fps differently.
 The server always operates at a maximum of 72 fps. This guarantees that vanilla Quake
@@ -728,6 +747,7 @@ You may freely redistribute or modify JoeQuake as you wish.
 
 I would like to thank the following people for using their stuff:
 
+* Sphere, for his help and participation in development of JoeQuake 🖤
 * A. "Fuh" Nourai, for every FuhQuake addition
 * Anton "Tonik" Gavrilov, for every ZQuake addition
 * fenix@io.com, for alias model interpolation
