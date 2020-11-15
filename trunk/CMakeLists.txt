@@ -29,9 +29,11 @@ add_executable(joequake-gl
     fakegl.h
     fmod_errors.h
     fmod.h
+    fmod.c
     gl_decals.c
     gl_draw.c
     gl_fakegl.c
+    gl_fog.c
     gl_mesh.c
     gl_model.c
     gl_model.h
