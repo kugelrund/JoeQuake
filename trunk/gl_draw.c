@@ -366,8 +366,9 @@ mpic_t *Draw_CachePic (char *path)
 	pic->pic.width = dat->width;
 	pic->pic.height = dat->height;
 
-	if (gl_externaltextures_gfx.value && (pic_24bit = GL_LoadPicImage(path, NULL, 0, 0, TEX_ALPHA)))
-		memcpy (&pic->pic.texnum, &pic_24bit->texnum, sizeof(mpic_t) - 8);
+	if (gl_externaltextures_gfx.value && (pic_24bit = GL_LoadPicImage(path, NULL, 0, 0, TEX_ALPHA)) &&
+		(pic_24bit->width / pic_24bit->height) == (pic->pic.width / pic->pic.height))	// do not display hi-res images stretched, instead show the original lmp
+		memcpy(&pic->pic.texnum, &pic_24bit->texnum, sizeof(mpic_t) - 8);
 	else
 		GL_LoadPicTexture (path, &pic->pic, dat->data);
 
@@ -688,14 +689,6 @@ void Draw_Init (void)
 	// 3dfx can only handle 256 wide textures
 	if (!Q_strncasecmp((char *)gl_renderer, "3dfx", 4) || strstr((char *)gl_renderer, "Glide"))
 		Cvar_SetValue (&gl_max_size, 256);
-
-	W_LoadWadFile("gfx.wad");
-	//CachePics_DeInit();	//j0zzz: FIXME?!?
-
-	// Clear the scrap.
-	memset(scrap_allocated, 0, sizeof(scrap_allocated));
-	memset(scrap_texels, 0, sizeof(scrap_texels));
-	scrap_dirty = 0;	// Bit mask.
 
 	Draw_InitCharset ();
 	Draw_InitConback ();
@@ -1744,7 +1737,7 @@ void GL_Upload8 (byte *data, int width, int height, int mode)
 {
 	int		i, size, p;
 	unsigned	*table;
-	static unsigned	trans[960*480];
+	static unsigned	trans[512*512*4];	// joe: raised value from 960*480
 
 	table = (mode & TEX_BRIGHTEN) ? d_8to24table2 : d_8to24table;
 	size = width * height;

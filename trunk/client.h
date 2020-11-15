@@ -104,10 +104,10 @@ typedef struct framepos_s
 
 extern	framepos_t	*dem_framepos;
 
-#define	MAX_EFRAGS	640
+#define	MAX_EFRAGS		4096	// joe: was 640
 
 #define	MAX_MAPSTRING	2048
-#define	MAX_DEMOS	32
+#define	MAX_DEMOS		32
 #define	MAX_DEMONAME	64
 
 typedef enum
@@ -236,6 +236,9 @@ typedef struct
 	qboolean	console_ping;		// true if the ping came from the console
 	double		last_status_time;	// last time status was obtained
 	qboolean	console_status;		// true if the status came from the console
+
+	unsigned	protocol; //johnfitz
+	unsigned	protocolflags;
 } client_state_t;
 
 extern	client_state_t	cl;

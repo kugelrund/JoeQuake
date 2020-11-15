@@ -25,7 +25,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #define	BLOCK_HEIGHT		128
 
 #define MAX_LIGHTMAP_SIZE	4096
-#define	MAX_LIGHTMAPS		64
+#define MAX_LIGHTMAPS		512 //johnfitz -- was 64 
 
 static	int	lightmap_textures;
 
@@ -111,6 +111,7 @@ void R_RenderFullbrights (void)
 	glEnable (GL_ALPHA_TEST);
 
 	glTexEnvf (GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+	Fog_StartAdditive();
 
 	for (i = 1 ; i < MAX_GLTEXTURES ; i++)
 	{
@@ -122,6 +123,7 @@ void R_RenderFullbrights (void)
 		fullbright_polys[i] = NULL;
 	}
 
+	Fog_StopAdditive();
 	glDisable (GL_ALPHA_TEST);
 	glDepthMask (GL_TRUE);
 
@@ -141,6 +143,7 @@ void R_RenderLumas (void)
 	glBlendFunc (GL_ONE, GL_ONE);
 
 	glTexEnvf (GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+	Fog_StartAdditive();
 
 	for (i = 1 ; i < MAX_GLTEXTURES ; i++)
 	{
@@ -152,6 +155,7 @@ void R_RenderLumas (void)
 		luma_polys[i] = NULL;
 	}
 
+	Fog_StopAdditive();
 	glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glDisable (GL_BLEND);
 	glDepthMask (GL_TRUE);
@@ -532,6 +536,8 @@ void R_BlendLightmaps (void)
 	if (!r_lightmap.value)
 		glEnable (GL_BLEND);
 
+	Fog_StartAdditive();
+
 	for (i = 0 ; i < MAX_LIGHTMAPS ; i++)
 	{
 		if (!lightmap_polys[i])
@@ -553,6 +559,7 @@ void R_BlendLightmaps (void)
 		lightmap_polys[i] = NULL;
 	}
 
+	Fog_StopAdditive();
 	glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glDisable (GL_BLEND);
 	glDepthMask (GL_TRUE);		// back to normal Z buffering
@@ -800,7 +807,7 @@ void DrawTextureChains (model_t *model)
 	msurface_t	*s;
 	texture_t	*t;
 	qboolean	mtex_lightmaps, mtex_fbs, doMtex1, doMtex2, render_lightmaps = false;
-	qboolean	draw_fbs, draw_mtex_fbs, can_mtex_lightmaps, can_mtex_fbs;
+	qboolean	draw_fbs, draw_mtex_fbs, can_mtex_lightmaps, can_mtex_fbs, doAlphaTest;
 
 	if (gl_fb_bmodels.value)
 	{
@@ -826,6 +833,14 @@ void DrawTextureChains (model_t *model)
 		// bind the world texture
 		GL_SelectTexture (GL_TEXTURE0_ARB);
 		GL_Bind (t->gl_texturenum);
+
+		doAlphaTest = false;
+		if ((t->texturechain[0] && t->texturechain[0]->flags & SURF_DRAWFENCE) ||
+			(t->texturechain[1] && t->texturechain[1]->flags & SURF_DRAWFENCE))
+		{
+			glEnable(GL_ALPHA_TEST);
+			doAlphaTest = true;
+		}
 
 		draw_fbs = t->isLumaTexture || gl_fb_bmodels.value;
 		draw_mtex_fbs = draw_fbs && can_mtex_fbs;
@@ -976,6 +991,9 @@ void DrawTextureChains (model_t *model)
 			GL_DisableTMU (GL_TEXTURE1_ARB);
 		if (doMtex2)
 			GL_DisableTMU (GL_TEXTURE2_ARB);
+
+		if (doAlphaTest)
+			glDisable(GL_ALPHA_TEST);
 	}
 
 	if (gl_mtexable)
@@ -1012,12 +1030,13 @@ R_DrawBrushModel
 void R_DrawBrushModel (entity_t *ent)
 {
 	int			i, k, underwater;
-	float		dot;
+	float		dot, transparency;
 	vec3_t		mins, maxs;
 	msurface_t	*psurf;
 	mplane_t	*pplane;
 	model_t		*clmodel = ent->model;
 	qboolean	rotated;
+	extern float GL_WaterAlphaForEntitySurface(entity_t *ent, msurface_t *s);
 
 	currenttexture = -1;
 
@@ -1037,11 +1056,14 @@ void R_DrawBrushModel (entity_t *ent)
 			return;
 	}
 
-	if (ISTRANSPARENT(ent))
+	psurf = &clmodel->surfaces[clmodel->firstmodelsurface];
+
+	if (ISTRANSPARENT(ent) || psurf->flags & (SURF_DRAWLAVA | SURF_DRAWSLIME | SURF_DRAWWATER))
 	{
+		transparency = GL_WaterAlphaForEntitySurface(ent, psurf);
 		glEnable (GL_BLEND);
 		glTexEnvf (GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-		glColor4f (1, 1, 1, ent->transparency);
+		glColor4f (1, 1, 1, transparency);
 	}
 
 	VectorSubtract (r_refdef.vieworg, ent->origin, modelorg);
@@ -1055,8 +1077,6 @@ void R_DrawBrushModel (entity_t *ent)
 		modelorg[1] = -DotProduct (temp, right);
 		modelorg[2] = DotProduct (temp, up);
 	}
-
-	psurf = &clmodel->surfaces[clmodel->firstmodelsurface];
 
 	// calculate dynamic lighting for bmodel if it's not an instanced model
 	if (clmodel->firstmodelsurface != 0 && !gl_flashblend.value)
@@ -1258,10 +1278,7 @@ void R_DrawWorld (void)
 	// set up texture chains for the world
 	R_RecursiveWorldNode (cl.worldmodel->nodes, 15);
 
-	if (r_skyboxloaded)
-		R_DrawSkyBox ();
-	else
-		R_DrawSkyChain ();
+	R_DrawSky();
 
 	// draw the world
 	DrawTextureChains (cl.worldmodel);
@@ -1397,17 +1414,10 @@ void BuildSurfaceDisplayList (msurface_t *fa)
 	vertpage = 0;
 
 	// draw texture
-	if (!fa->polys) // seems map loaded first time, so light maps loaded first time too 
-	{
-		poly = Hunk_Alloc(sizeof(glpoly_t) + (lnumverts - 4) * VERTEXSIZE * sizeof(float));
-		poly->next = fa->polys;
-		fa->polys = poly;
-		poly->numverts = lnumverts;
-	}
-	else // seems vid_restart issued, so do not allocate memory, we alredy done it, I hope 
-	{
-		poly = fa->polys;
-	}
+	poly = Hunk_Alloc(sizeof(glpoly_t) + (lnumverts - 4) * VERTEXSIZE * sizeof(float));
+	poly->next = fa->polys;
+	fa->polys = poly;
+	poly->numverts = lnumverts;
 
 	for (i = 0 ; i < lnumverts ; i++)
 	{

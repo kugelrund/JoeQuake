@@ -380,11 +380,15 @@
       <Command>
       </Command>
     </PostBuildEvent>
+    <Manifest>
+      <EnableDpiAwareness>true</EnableDpiAwareness>
+    </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ResourceCompile Include="joequake.rc" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="fmod.c" />
     <ClCompile Include="gl_decals.c">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Software Release|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Software Debug|Win32'">true</ExcludedFromBuild>
@@ -394,6 +398,7 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Software Debug|Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="gl_fakegl.c" />
+    <ClCompile Include="gl_fog.c" />
     <ClCompile Include="gl_mesh.c">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Software Release|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Software Debug|Win32'">true</ExcludedFromBuild>
@@ -645,6 +650,8 @@
     <ClInclude Include="gl_model.h" />
     <ClInclude Include="glquake.h" />
     <ClInclude Include="cdaudio.h" />
+    <ClInclude Include="progdefs.h" />
+    <ClInclude Include="progs.h" />
     <ClInclude Include="sound.h" />
     <ClInclude Include="server.h" />
     <ClInclude Include="draw.h" />

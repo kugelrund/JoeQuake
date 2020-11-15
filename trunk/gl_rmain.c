@@ -95,6 +95,8 @@ cvar_t	r_drawflame = {"r_drawflame", "1"};
 cvar_t	r_farclip = {"r_farclip", "4096"};
 qboolean OnChange_r_skybox (cvar_t *var, char *string);
 cvar_t	r_skybox = {"r_skybox", "", 0, OnChange_r_skybox};
+qboolean OnChange_r_skyfog(cvar_t *var, char *string);
+cvar_t	r_skyfog = { "r_skyfog", "0.5", 0, OnChange_r_skyfog };
 
 cvar_t	gl_clear = {"gl_clear", "0"};
 cvar_t	gl_cull = {"gl_cull", "1"};
@@ -145,6 +147,9 @@ cvar_t	gl_decal_explosions = {"gl_decal_explosions", "0"};
 int		lightmode = 2;
 
 float	pitch_rot;
+#if 0
+float	q3legs_rot;
+#endif
 
 void R_MarkLeaves (void);
 void R_InitBubble (void);
@@ -266,7 +271,23 @@ void R_RotateForEntity (entity_t *ent, qboolean shadow)
 
 		// skip pitch rotation for the legs model
 		if (ent->modelindex != cl_modelindex[mi_q3legs])
-			glRotatef (pitch_rot, 0, 1, 0);
+			glRotatef(pitch_rot, 0, 1, 0);
+#if 0
+		else
+		{
+			//experimental velocity based rotate
+			float length;
+			vec3_t delta;
+			static	vec3_t	oldorigin = { 0, 0, 0 };
+
+			VectorSubtract(oldorigin, ent->origin, delta);
+			length = VectorLength(delta);
+			//Con_Printf("%f\n", length);
+			q3legs_rot = (length / host_frametime) / 20;
+			glRotatef(q3legs_rot, 0, 1, 0);
+			VectorCopy(ent->origin, oldorigin);
+		}
+#endif
 		glRotatef (ent->angles1[2] + (lerpfrac * d[2]), 1, 0, 0);
 	}
 }
@@ -985,9 +1006,11 @@ void R_DrawAliasModel (entity_t *ent)
 			glDepthMask (GL_FALSE);
 			glEnable (GL_BLEND);
 			glBlendFunc (GL_ONE, GL_ONE);
+			Fog_StartAdditive();
 
 			R_DrawAliasFrame (ent->frame, paliashdr, ent, distance);
 
+			Fog_StopAdditive();
 			glDisable (GL_BLEND);
 			glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 			glDepthMask (GL_TRUE);
@@ -1018,9 +1041,11 @@ void R_DrawAliasModel (entity_t *ent)
 			{
 				glEnable (GL_ALPHA_TEST);
 			}
+			Fog_StartAdditive();
 
 			R_DrawAliasFrame (ent->frame, paliashdr, ent, distance);
 
+			Fog_StopAdditive();
 			if (islumaskin)
 			{
 				glDisable (GL_BLEND);
@@ -1167,7 +1192,7 @@ int DoWeaponInterpolation (void)
 ===============================================================================
 */
 
-void R_RotateForTagEntity (tagentity_t *tagent, md3tag_t *tag, float *m)
+void R_RotateForTagEntity (tagentity_t *tagent, md3tag_t *tag, float *m, float frametime)
 {
 	int		i;
 	float	lerpfrac, timepassed;
@@ -1191,7 +1216,7 @@ void R_RotateForTagEntity (tagentity_t *tagent, md3tag_t *tag, float *m)
 	}
 	else
 	{
-		lerpfrac = timepassed / 0.1;
+		lerpfrac = timepassed / frametime;
 		if (cl.paused || lerpfrac > 1)
 			lerpfrac = 1;
 	}
@@ -1220,7 +1245,7 @@ void R_RotateForTagEntity (tagentity_t *tagent, md3tag_t *tag, float *m)
 		}
 		else
 		{
-			lerpfrac = timepassed / 0.1;
+			lerpfrac = timepassed / frametime;
 			if (cl.paused || lerpfrac > 1)
 				lerpfrac = 1;
 		}
@@ -1650,9 +1675,11 @@ void R_DrawQ3Shadow (entity_t *ent, float lheight, float s1, float c1, trace_t d
 	glDepthMask (GL_FALSE);									\
 	glEnable (GL_BLEND);									\
 	glBlendFunc (GL_ONE, GL_ONE);							\
+	Fog_StartAdditive ();									\
 															\
 	R_DrawQ3Frame (frame, pmd3hdr, pmd3surf, ent, INTERP_MAXDIST);\
 															\
+	Fog_StopAdditive ();									\
 	glDisable (GL_BLEND);									\
 	glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);		\
 	glDepthMask (GL_TRUE);
@@ -1831,12 +1858,17 @@ void R_SetupQ3Frame (entity_t *ent)
 
 		glPushMatrix ();
 
-		R_RotateForTagEntity (tagent, tag, m);
+		R_RotateForTagEntity (tagent, tag, m, ent->frame_interval);
 		glMultMatrixf (m);
 
 		// apply pitch rotation from the torso model
 		if (ent->modelindex == cl_modelindex[mi_q3legs])
-			glRotatef (pitch_rot, 0, 1, 0);
+		{
+			glRotatef(pitch_rot, 0, 1, 0);
+#if 0
+			glRotatef(-q3legs_rot, 0, 1, 0);
+#endif
+		}
 
 		R_SetupQ3Frame (newent);
 
@@ -2233,7 +2265,6 @@ void R_DrawViewModel (void)
 		return;
 
 	currententity->transparency = (cl.items & IT_INVISIBILITY) ? gl_ringalpha.value : bound(0, r_drawviewmodel.value, 1);
-	currententity->istransparent = true;
 
 	// hack the depth range to prevent view model from poking into walls
 	glDepthRange (gldepthmin, gldepthmin + 0.3 * (gldepthmax - gldepthmin));
@@ -2435,6 +2466,8 @@ void R_SetupFrame (void)
 
 	r_framecount++;
 
+	Fog_SetupFrame(); //johnfitz
+
 // build the transformation matrix for the given view angles
 	VectorCopy (r_refdef.vieworg, r_origin);
 	AngleVectors (r_refdef.viewangles, vpn, vright, vup);
@@ -2571,6 +2604,7 @@ void R_Init (void)
 	Cvar_Register (&r_drawflame);
 	Cvar_Register (&r_skybox);
 	Cvar_Register (&r_farclip);
+	Cvar_Register(&r_skyfog);
 
 	Cvar_Register (&gl_finish);
 	Cvar_Register (&gl_clear);
@@ -2630,6 +2664,7 @@ void R_Init (void)
 	R_InitParticles ();
 	R_InitVertexLights ();
 	R_InitDecals ();
+	Fog_Init(); //johnfitz 
 
 	R_InitOtherTextures ();
 
@@ -2659,6 +2694,8 @@ void R_RenderScene (void)
 	R_SetupGL ();
 
 	R_MarkLeaves ();	// done here so we know if we're in water
+
+	Fog_EnableGFog();	//johnfitz 
 
 	R_DrawWorld ();		// adds static entities to the list
 
@@ -2761,6 +2798,7 @@ void R_RenderView (void)
 	R_RenderScene ();
 	R_RenderDlights ();
 	R_DrawParticles ();
+	Fog_DisableGFog(); //johnfitz
 	R_DrawViewModel ();
 
 	if (r_speeds.value)

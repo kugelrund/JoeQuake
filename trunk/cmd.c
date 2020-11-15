@@ -67,7 +67,7 @@ Cbuf_Init
 */
 void Cbuf_Init (void)
 {
-	SZ_Alloc (&cmd_text, 8192);		// space for commands and script files
+	SZ_Alloc(&cmd_text, 1 << 18);	// space for commands and script files. spike -- was 8192, but modern configs can be _HUGE_, at least if they contain lots of comments/docs for things.
 }
 
 /*
@@ -579,8 +579,8 @@ void Cmd_AddCommand (char *cmd_name, xcommand_t function)
 {
 	cmd_function_t	*cmd;
 
-	//if (host_initialized)	// because hunk allocation would get stomped
-	//	Sys_Error ("Cmd_AddCommand after host_initialized");
+	if (host_initialized)	// because hunk allocation would get stomped
+		Sys_Error ("Cmd_AddCommand after host_initialized");
 
 // fail if the command is a variable name
 	if (Cvar_VariableString(cmd_name)[0])

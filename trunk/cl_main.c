@@ -172,9 +172,11 @@ void CL_Disconnect (void)
 // stop sounds (especially looping!)
 	S_StopAllSounds (true);
 	
+	if (streamplaying)
+		FMOD_Stop_Stream_f();
+
 #ifdef GLQUAKE
-	if (nehahra)
-		FMOD_Stop_f ();
+	FMOD_Stop_f ();
 #endif
 
 // if running a local server, shut it down
@@ -1232,7 +1234,6 @@ void CL_CopyEntity (entity_t *dst, entity_t *src, int modelindex)
 
 	dst->transparency = src->transparency;
 	dst->smokepuff_time = src->smokepuff_time;
-	dst->istransparent = src->istransparent;
 }
 #endif
 

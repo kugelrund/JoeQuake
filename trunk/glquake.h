@@ -54,7 +54,11 @@ extern	byte	color_white[4], color_black[4];
 #define TEX_FULLBRIGHT		16
 #define	TEX_BRIGHTEN		32
 
-#define	MAX_GLTEXTURES	2048
+#define	MAX_GLTEXTURES	4096	//joe: was 2048
+
+//MHGLQFIX: polygons are not native to GPUs so use triangle fans instead
+#undef GL_POLYGON
+#define GL_POLYGON GL_TRIANGLE_FAN
 
 void GL_SelectTexture (GLenum target);
 void GL_DisableMultitexture (void);
@@ -96,7 +100,7 @@ void R_TimeRefresh_f (void);
 void R_ReadPointFile_f (void);
 texture_t *R_TextureAnimation (texture_t *base);
 
-#define ISTRANSPARENT(ent)	(((ent)->istransparent && (ent)->transparency > 0 && (ent)->transparency < 1) || \
+#define ISTRANSPARENT(ent)	(((ent)->transparency > 0 && (ent)->transparency < 1) || \
 							 (ent)->model && (ent)->model->type == mod_md3 && ((ent)->model->flags & EF_Q3TRANS))
 
 //====================================================
@@ -292,6 +296,8 @@ void R_ClearSkyBox (void);
 void R_DrawSkyBox (void);
 extern qboolean	r_skyboxloaded;
 int R_SetSky (char *skyname);
+void Sky_NewMap(void);
+void R_DrawSky(void);
 
 // gl_draw.c
 extern	cvar_t	gl_texturemode;
@@ -306,6 +312,19 @@ void R_BrightenScreen (void);
 void R_Q3DamageDraw (void);
 #define NUMVERTEXNORMALS	162
 extern	float	r_avertexnormals[NUMVERTEXNORMALS][3];
+
+//johnfitz -- fog functions called from outside gl_fog.c
+void Fog_ParseServerMessage(void);
+float *Fog_GetColor(void);
+float Fog_GetDensity(void);
+void Fog_EnableGFog(void);
+void Fog_DisableGFog(void);
+void Fog_StartAdditive(void);
+void Fog_StopAdditive(void);
+void Fog_SetupFrame(void);
+void Fog_NewMap(void);
+void Fog_Init(void);
+void Fog_SetupState(void);
 
 // gl_rlight.c
 void R_MarkLights (dlight_t *light, int lnum, mnode_t *node);
