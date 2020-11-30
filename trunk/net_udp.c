@@ -56,14 +56,32 @@ int UDP_Init (void)
 	char	buff[MAXHOSTNAMELEN];
 	struct qsockaddr addr;
 	char *colon;
+	int i;
 	
 	if (COM_CheckParm ("-noudp"))
 		return -1;
 
-	// determine my name & address
-	gethostname(buff, MAXHOSTNAMELEN);
-	local = gethostbyname(buff);
-	myAddr = *(int *)local->h_addr_list[0];
+	if ((i = COM_CheckParm("-ip")))
+	{
+		if (i < com_argc-1)
+		{
+			myAddr = inet_addr(com_argv[i+1]);
+			if (myAddr == INADDR_NONE)
+				Sys_Error ("%s is not a valid IP address", com_argv[i+1]);
+			strcpy (my_tcpip_address, com_argv[i+1]);
+		}
+		else
+		{
+			Sys_Error ("NET_Init: you must specify an IP address after -ip");
+		}
+	}
+	else
+	{
+		// determine my name & address
+		gethostname(buff, MAXHOSTNAMELEN);
+		local = gethostbyname(buff);
+		myAddr = *(int *)local->h_addr_list[0];
+	}
 
 	// if the quake hostname isn't set, set it to the machine name
 	if (!strcmp(hostname.string, "UNNAMED"))
