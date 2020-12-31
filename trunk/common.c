@@ -278,6 +278,71 @@ void Q_snprintfz (char *dest, size_t size, char *fmt, ...)
 }
 
 /*
+* Appends src to string dst of size siz (unlike strncat, siz is the
+* full size of dst, not space left).  At most siz-1 characters
+* will be copied.  Always NUL terminates (unless siz <= strlen(dst)).
+* Returns strlen(src) + MIN(siz, strlen(initial dst)).
+* If retval >= siz, truncation occurred.
+*/
+size_t Q_strlcat(char *dst, const char *src, size_t siz)
+{
+	char *d = dst;
+	const char *s = src;
+	size_t n = siz;
+	size_t dlen;
+
+	/* Find the end of dst and adjust bytes left but don't go past end */
+	while (n-- != 0 && *d != '\0')
+		d++;
+	dlen = d - dst;
+	n = siz - dlen;
+
+	if (n == 0)
+		return(dlen + strlen(s));
+	while (*s != '\0') {
+		if (n != 1) {
+			*d++ = *s;
+			n--;
+		}
+		s++;
+	}
+	*d = '\0';
+
+	return(dlen + (s - src));	/* count does not include NUL */
+}
+
+/*
+* Copy src to string dst of size siz.  At most siz-1 characters
+* will be copied.  Always NUL terminates (unless siz == 0).
+* Returns strlen(src); if retval >= siz, truncation occurred.
+*/
+
+size_t Q_strlcpy(char *dst, const char *src, size_t siz)
+{
+	char *d = dst;
+	const char *s = src;
+	size_t n = siz;
+
+	/* Copy as many bytes as will fit */
+	if (n != 0) {
+		while (--n != 0) {
+			if ((*d++ = *s++) == '\0')
+				break;
+		}
+	}
+
+	/* Not enough room in dst, add NUL and traverse rest of src */
+	if (n == 0) {
+		if (siz != 0)
+			*d = '\0';		/* NUL-terminate dst */
+		while (*s++)
+			;
+	}
+
+	return(s - src - 1);	/* count does not include NUL */
+}
+
+/*
 ============================================================================
 
 			BYTE ORDER FUNCTIONS
@@ -775,32 +840,39 @@ char *COM_FileExtension (char *in)
 /*
 ============
 COM_FileBase
+take 'somedir/otherdir/filename.ext',
+write only 'filename' to the output
 ============
 */
-void COM_FileBase (char *in, char *out)
+void COM_FileBase(const char *in, char *out, size_t outsize)
 {
-	char	*s, *s2;
-	
-	s = in + strlen(in) - 1;
-	
-	while (s != in && *s != '.')
-		s--;
-	
-	// had a bug here when in == "gfx.wad", as it does not have a slash.
-	// therefore added the check s2 != in - 1
-	for (s2 = s ; s2 != in - 1 && *s2 && *s2 != '/'; s2--)
-		;
-	
-	if (s-s2 < 2)
-		strcpy (out, "?model?");
+	const char	*dot, *slash, *s;
+
+	s = in;
+	slash = in;
+	dot = NULL;
+	while (*s)
+	{
+		if (*s == '/')
+			slash = s + 1;
+		if (*s == '.')
+			dot = s;
+		s++;
+	}
+	if (dot == NULL)
+		dot = s;
+
+	if (dot - slash < 2)
+		Q_strlcpy(out, "?model?", outsize);
 	else
 	{
-		s--;
-		strncpy (out, s2+1, s-s2);
-		out[s-s2] = 0;
+		size_t	len = dot - slash;
+		if (len >= outsize)
+			len = outsize - 1;
+		memcpy(out, slash, len);
+		out[len] = '\0';
 	}
 }
-
 
 /*
 ==================
@@ -1502,6 +1574,12 @@ Filename are reletive to the quake directory.
 Always appends a 0 byte.
 =================
 */
+#define	LOADFILE_ZONE		0
+#define	LOADFILE_HUNK		1
+#define	LOADFILE_TEMPHUNK	2
+#define	LOADFILE_CACHE		3
+#define	LOADFILE_STACK		4
+
 cache_user_t 	*loadcache;
 byte    	*loadbuf;
 int             loadsize;
@@ -1511,7 +1589,7 @@ byte *COM_LoadFile (char *path, int usehunk)
 	FILE	*h;
 	byte	*buf;
 	char	base[32];
-	int	len;
+	int		len;
 
 	buf = NULL;     // quiet compiler warning
 
@@ -1521,34 +1599,30 @@ byte *COM_LoadFile (char *path, int usehunk)
 		return NULL;
 
 	// extract the filename base name for hunk tag
-	COM_FileBase (path, base);
+	COM_FileBase (path, base, sizeof(base));
 	
-	if (usehunk == 1)
+	switch (usehunk)
 	{
-		buf = Hunk_AllocName (len + 1, base);
-	}
-	else if (usehunk == 2)
-	{
-		buf = Hunk_TempAlloc (len + 1);
-	}
-	else if (usehunk == 0)
-	{
-		buf = Z_Malloc (len + 1);
-	}
-	else if (usehunk == 3)
-	{
-		buf = Cache_Alloc (loadcache, len + 1, base);
-	}
-	else if (usehunk == 4)
-	{
-		if (len + 1 > loadsize)
-			buf = Hunk_TempAlloc (len + 1);
-		else
+	case LOADFILE_HUNK:
+		buf = (byte *)Hunk_AllocName(len + 1, base);
+		break;
+	case LOADFILE_TEMPHUNK:
+		buf = (byte *)Hunk_TempAlloc(len + 1);
+		break;
+	case LOADFILE_ZONE:
+		buf = (byte *)Z_Malloc(len + 1);
+		break;
+	case LOADFILE_CACHE:
+		buf = (byte *)Cache_Alloc(loadcache, len + 1, base);
+		break;
+	case LOADFILE_STACK:
+		if (len < loadsize)
 			buf = loadbuf;
-	}
-	else
-	{
-		Sys_Error ("COM_LoadFile: bad usehunk");
+		else
+			buf = (byte *)Hunk_TempAlloc(len + 1);
+		break;
+	default:
+		Sys_Error("COM_LoadFile: bad usehunk");
 	}
 
 	if (!buf)

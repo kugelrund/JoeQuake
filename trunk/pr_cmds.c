@@ -20,6 +20,16 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 
+#define	STRINGTEMP_BUFFERS		16
+#define	STRINGTEMP_LENGTH		1024
+static	char	pr_string_temp[STRINGTEMP_BUFFERS][STRINGTEMP_LENGTH];
+static	byte	pr_string_tempindex = 0;
+
+static char *PR_GetTempString(void)
+{
+	return pr_string_temp[(STRINGTEMP_BUFFERS - 1) & ++pr_string_tempindex];
+}
+
 #define	RETURN_EDICT(e) (((int *)pr_globals)[OFS_RETURN] = EDICT_TO_PROG(e))
 
 /*
@@ -30,15 +40,27 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 ===============================================================================
 */
 
-char *PF_VarString (int	first)
+static char *PF_VarString(int	first)
 {
 	int		i;
-	static	char	out[256];
+	static char out[1024];
+	size_t s;
 
 	out[0] = 0;
-	for (i = first ; i < pr_argc ; i++)
-		strcat (out, G_STRING((OFS_PARM0 + i * 3)));
-
+	s = 0;
+	for (i = first; i < pr_argc; i++)
+	{
+		s = Q_strlcat(out, G_STRING((OFS_PARM0 + i * 3)), sizeof(out));
+		if (s >= sizeof(out))
+		{
+			Con_DPrintf("PF_VarString: overflow (string truncated)\n");
+			return out;
+		}
+	}
+	if (s > 255)
+	{
+		Con_DPrintf("PF_VarString: %i characters exceeds standard limit of 255 (max = %d).\n", (int)s, (int)(sizeof(out) - 1));
+	}
 	return out;
 }
 
@@ -58,7 +80,7 @@ void PF_error (void)
 	edict_t	*ed;
 
 	s = PF_VarString (0);
-	Con_Printf ("====== SERVER ERROR in %s:\n%s\n", pr_strings + pr_xfunction->s_name, s);
+	Con_Printf ("====== SERVER ERROR in %s:\n%s\n", PR_GetString(pr_xfunction->s_name), s);
 	ed = PROG_TO_EDICT(pr_global_struct->self);
 	ED_Print (ed);
 
@@ -81,7 +103,7 @@ void PF_objerror (void)
 	edict_t	*ed;
 
 	s = PF_VarString (0);
-	Con_Printf ("====== OBJECT ERROR in %s:\n%s\n", pr_strings + pr_xfunction->s_name, s);
+	Con_Printf ("====== OBJECT ERROR in %s:\n%s\n", PR_GetString(pr_xfunction->s_name), s);
 	ed = PROG_TO_EDICT(pr_global_struct->self);
 	ED_Print (ed);
 	ED_Free (ed);
@@ -244,13 +266,20 @@ void PF_setmodel (void)
 	if (!*check)
 		PR_RunError ("no precache: %s\n", m);
 
-	e->v.model = m - pr_strings;
+	e->v.model = PR_SetEngineString(*check);
 	e->v.modelindex = i; //SV_ModelIndex (m);
 
 	mod = sv.models[(int)e->v.modelindex];  // Mod_ForName (m, true);
 
 	if (mod)
-		SetMinMaxSize (e, mod->mins, mod->maxs, true);
+	//johnfitz -- correct physics cullboxes for bmodels
+	{
+		if (mod->type == mod_brush)
+			SetMinMaxSize(e, mod->clipmins, mod->clipmaxs, true);
+		else
+			SetMinMaxSize(e, mod->mins, mod->maxs, true);
+	}
+	//johnfitz
 	else
 		SetMinMaxSize (e, vec3_origin, vec3_origin, true);
 }
@@ -512,9 +541,8 @@ void PF_ambientsound (void)
 	if (soundnum > 255)
 	{
 		if (sv.protocol == PROTOCOL_NETQUAKE)
-			return; //don't send any info protocol can't support
-		else
-			large = true;
+			sv.protocol = PROTOCOL_FITZQUAKE; //joe: force protocol switch from this point
+		large = true;
 	}
 	//johnfitz 
 
@@ -675,11 +703,12 @@ void PF_checkpos (void)
 
 //============================================================================
 
-byte	checkpvs[MAX_MAP_LEAFS/8];
+static byte	*checkpvs;	//ericw -- changed to malloc
+static int	checkpvs_capacity;
 
 int PF_newcheckclient (int check)
 {
-	int	i;
+	int		i, pvsbytes;
 	byte	*pvs;
 	edict_t	*ent;
 	mleaf_t	*leaf;
@@ -722,7 +751,16 @@ int PF_newcheckclient (int check)
 	VectorAdd (ent->v.origin, ent->v.view_ofs, org);
 	leaf = Mod_PointInLeaf (org, sv.worldmodel);
 	pvs = Mod_LeafPVS (leaf, sv.worldmodel);
-	memcpy (checkpvs, pvs, (sv.worldmodel->numleafs+7)>>3);
+	
+	pvsbytes = (sv.worldmodel->numleafs + 7) >> 3;
+	if (checkpvs == NULL || pvsbytes > checkpvs_capacity)
+	{
+		checkpvs_capacity = pvsbytes;
+		checkpvs = (byte *)Q_realloc(checkpvs, checkpvs_capacity);
+		if (!checkpvs)
+			Sys_Error("PF_newcheckclient: realloc() failed on %d bytes", checkpvs_capacity);
+	}
+	memcpy(checkpvs, pvs, pvsbytes);
 
 	return i;
 }
@@ -918,18 +956,18 @@ void PF_dprint (void)
 	Con_DPrintf ("%s",PF_VarString(0));
 }
 
-char	pr_string_temp[128];
-
 void PF_ftos (void)
 {
 	float	v;
+	char	*s;
 
 	v = G_FLOAT(OFS_PARM0);
+	s = PR_GetTempString();
 	if (v == (int)v)
-		sprintf (pr_string_temp, "%d",(int)v);
+		sprintf (s, "%d",(int)v);
 	else
-		sprintf (pr_string_temp, "%5.1f",v);
-	G_INT(OFS_RETURN) = pr_string_temp - pr_strings;
+		sprintf (s, "%5.1f",v);
+	G_INT(OFS_RETURN) = PR_SetEngineString(s);
 }
 
 void PF_fabs (void)
@@ -942,14 +980,20 @@ void PF_fabs (void)
 
 void PF_vtos (void)
 {
-	sprintf (pr_string_temp, "'%5.1f %5.1f %5.1f'", G_VECTOR(OFS_PARM0)[0], G_VECTOR(OFS_PARM0)[1], G_VECTOR(OFS_PARM0)[2]);
-	G_INT(OFS_RETURN) = pr_string_temp - pr_strings;
+	char	*s;
+
+	s = PR_GetTempString();
+	sprintf (s, "'%5.1f %5.1f %5.1f'", G_VECTOR(OFS_PARM0)[0], G_VECTOR(OFS_PARM0)[1], G_VECTOR(OFS_PARM0)[2]);
+	G_INT(OFS_RETURN) = PR_SetEngineString(s);
 }
 
 void PF_etos (void)
 {
-	sprintf (pr_string_temp, "entity %i", G_EDICTNUM(OFS_PARM0));
-	G_INT(OFS_RETURN) = pr_string_temp - pr_strings;
+	char	*s;
+
+	s = PR_GetTempString(); 
+	sprintf (s, "entity %i", G_EDICTNUM(OFS_PARM0));
+	G_INT(OFS_RETURN) = PR_SetEngineString(s);
 }
 
 void PF_Spawn (void)
@@ -1027,6 +1071,7 @@ void PF_precache_sound (void)
 		if (!sv.sound_precache[i])
 		{
 			sv.sound_precache[i] = s;
+			sv.num_sound_precaches = i + 1;
 			return;
 		}
 		if (!strcmp(sv.sound_precache[i], s))
@@ -1053,6 +1098,7 @@ void PF_precache_model (void)
 		{
 			sv.model_precache[i] = s;
 			sv.models[i] = Mod_ForName (s, true);
+			sv.num_model_precaches = i + 1;
 			return;
 		}
 		if (!strcmp(sv.model_precache[i], s))
@@ -1562,22 +1608,15 @@ void PF_makestatic (void)
 
 	//johnfitz -- PROTOCOL_FITZQUAKE
 	if (sv.protocol == PROTOCOL_NETQUAKE)
-	{
-		if (SV_ModelIndex(pr_strings + ent->v.model) & 0xFF00 || (int)(ent->v.frame) & 0xFF00)
-		{
-			ED_Free(ent);
-			return; //can't display the correct model & frame, so don't show it at all
-		}
-	}
-	else
-	{
-		if (SV_ModelIndex(pr_strings + ent->v.model) & 0xFF00)
-			bits |= B_LARGEMODEL;
-		if ((int)(ent->v.frame) & 0xFF00)
-			bits |= B_LARGEFRAME;
-		if (ent->alpha != ENTALPHA_DEFAULT)
-			bits |= B_ALPHA;
-	}
+		if (SV_ModelIndex(PR_GetString(ent->v.model)) & 0xFF00 || (int)(ent->v.frame) & 0xFF00)
+			sv.protocol = PROTOCOL_FITZQUAKE; //joe: force protocol switch from this point
+
+	if (SV_ModelIndex(PR_GetString(ent->v.model)) & 0xFF00)
+		bits |= B_LARGEMODEL;
+	if ((int)(ent->v.frame) & 0xFF00)
+		bits |= B_LARGEFRAME;
+	if (ent->alpha != ENTALPHA_DEFAULT)
+		bits |= B_ALPHA;
 
 	if (bits)
 	{
@@ -1588,9 +1627,9 @@ void PF_makestatic (void)
 		MSG_WriteByte (&sv.signon, svc_spawnstatic);
 
 	if (bits & B_LARGEMODEL)
-		MSG_WriteShort(&sv.signon, SV_ModelIndex(pr_strings + ent->v.model));
+		MSG_WriteShort(&sv.signon, SV_ModelIndex(PR_GetString(ent->v.model)));
 	else
-		MSG_WriteByte(&sv.signon, SV_ModelIndex(pr_strings + ent->v.model));
+		MSG_WriteByte(&sv.signon, SV_ModelIndex(PR_GetString(ent->v.model)));
 
 	if (bits & B_LARGEFRAME)
 		MSG_WriteShort(&sv.signon, ent->v.frame);

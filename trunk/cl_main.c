@@ -67,10 +67,12 @@ client_static_t	cls;
 client_state_t	cl;
 // FIXME: put these on hunk?
 efrag_t			cl_efrags[MAX_EFRAGS];
-entity_t		cl_entities[MAX_EDICTS];
 entity_t		cl_static_entities[MAX_STATIC_ENTITIES];
 lightstyle_t	cl_lightstyle[MAX_LIGHTSTYLES];
 dlight_t		cl_dlights[MAX_DLIGHTS];
+
+entity_t		*cl_entities; //johnfitz -- was a static array, now on hunk
+int				cl_max_edicts; //johnfitz -- only changes when new map loads
 
 int				cl_numvisedicts;
 entity_t		*cl_visedicts[MAX_VISEDICTS];
@@ -83,6 +85,7 @@ qboolean		r_loadq3player = false;
 
 extern qboolean physframe;
 extern double physframetime;
+extern char *skill_modes[];
 
 unsigned CheckModel (char *mdl);
 
@@ -119,8 +122,12 @@ void CL_ClearState (void)
 	memset (cl_efrags, 0, sizeof(cl_efrags));
 	memset (cl_dlights, 0, sizeof(cl_dlights));
 	memset (cl_lightstyle, 0, sizeof(cl_lightstyle));
-	memset (cl_entities, 0, sizeof(cl_entities));
 	memset (cl_temp_entities, 0, sizeof(cl_temp_entities));
+
+	//johnfitz -- cl_entities is now dynamically allocated
+	cl_max_edicts = bound(MIN_EDICTS, (int)max_edicts.value, MAX_EDICTS);
+	cl_entities = (entity_t *)Hunk_AllocName(cl_max_edicts*sizeof(entity_t), "cl_entities");
+	//johnfitz
 
 // allocate the efrags and chain together into a free list
 	cl.free_efrags = cl_efrags;
@@ -333,6 +340,11 @@ void CL_SignonReply (void)
 				Cmd_ExecuteString(va("record %s\n", cl_autodemo_name.string), src_command);
 			else
 				Cmd_ExecuteString("record\n", src_command);
+		}
+		if (!pr_qdqstats)
+		{
+			int current_skill = bound(0, skill.value, 3);
+			Con_Printf("Playing on %s skill\n", skill_modes[current_skill]);
 		}
 		break;
 	}
@@ -1145,6 +1157,9 @@ void CL_CalcCrouch (void)
 	static	vec3_t	oldorigin = {0, 0, 0};
 	static	float	oldz = 0, extracrouch = 0, crouchspeed = 100;
 	
+	if (!cl.num_entities)
+		return;
+
 	ent = &cl_entities[cl.viewentity];
 
 	teleported = !VectorL2Compare(ent->origin, oldorigin, 48);

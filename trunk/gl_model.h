@@ -85,7 +85,7 @@ typedef struct texture_s
 #define SURF_DRAWBACKGROUND	0x40
 #define SURF_UNDERWATER		0x80
 #define SURF_NOTEXTURE		0x100 //johnfitz
-#define SURF_DRAWFENCE		0x200
+#define SURF_DRAWALPHA		0x200
 #define SURF_DRAWLAVA		0x400
 #define SURF_DRAWSLIME		0x800
 #define SURF_DRAWTELE		0x1000
@@ -477,6 +477,7 @@ typedef enum
 #define	EF_TRACER2	64		// orange split trail + rotate
 #define	EF_TRACER3	128		// purple trail
 #define	EF_Q3TRANS	256		// Q3 model containing transparent surface(s)
+#define EF_NOSHADOW 512		// don't cast a shadow
 
 typedef struct model_s
 {
@@ -560,6 +561,7 @@ void Mod_TouchModel (char *name);
 
 mleaf_t *Mod_PointInLeaf (float *p, model_t *model);
 byte *Mod_LeafPVS (mleaf_t *leaf, model_t *model);
+byte *Mod_NoVisPVS(model_t *model);
 
 qboolean Mod_IsAnyKindOfPlayerModel(model_t *mod);
 

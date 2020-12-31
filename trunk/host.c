@@ -71,6 +71,7 @@ cvar_t	host_speeds = {"host_speeds", "0"};		// set for running times
 cvar_t	sys_ticrate = {"sys_ticrate", "0.05"};
 cvar_t	sys_inactivesleep = {"sys_inactivesleep", "20"};  // msec to sleep when window not focused
 cvar_t	serverprofile = {"serverprofile", "0"};
+cvar_t	max_edicts = { "max_edicts", "8192" };	//johnfitz //ericw -- changed from 2048 to 8192, removed CVAR_ARCHIVE 
 
 cvar_t	fraglimit = {"fraglimit", "0", CVAR_SERVER};
 cvar_t	timelimit = {"timelimit", "0", CVAR_SERVER};
@@ -81,6 +82,13 @@ cvar_t	noexit = {"noexit", "0", CVAR_SERVER};
 
 cvar_t	developer = {"developer", "0"};
 
+char *skill_modes[] =
+{
+	"Easy",
+	"Normal",
+	"Hard",
+	"Nightmare"
+};
 cvar_t	skill = {"skill", "1"};			// 0 - 3
 cvar_t	deathmatch = {"deathmatch", "0"};	// 0, 1, or 2
 cvar_t	coop = {"coop", "0"};			// 0 or 1
@@ -224,6 +232,7 @@ void Host_InitLocal (void)
 	Cvar_Register (&sys_ticrate);
 	Cvar_Register (&sys_inactivesleep);
 	Cvar_Register (&serverprofile);
+	Cvar_Register (&max_edicts); //johnfitz 
 
 	Cvar_Register (&fraglimit);
 	Cvar_Register (&timelimit);
@@ -503,7 +512,6 @@ void Host_ShutdownServer (qboolean crash)
 			SV_DropClient (crash);
 
 // clear structures
-	memset (&sv, 0, sizeof(sv));
 	memset (svs.clients, 0, svs.maxclientslimit * sizeof(client_t));
 }
 
@@ -524,6 +532,7 @@ void Host_ClearMemory (void)
 		Hunk_FreeToLowMark (host_hunklevel);
 
 	cls.signon = 0;
+	free(sv.edicts); // ericw -- sv.edicts switched to use malloc() 
 	memset (&sv, 0, sizeof(sv));
 	memset (&cl, 0, sizeof(cl));
 }

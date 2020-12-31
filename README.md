@@ -5,9 +5,6 @@
                         --------------------
                   <http://joequake.runecentral.com>
 
-First of all, JoeQuake is 90% ZQuake (<http://zquake.frag.ru/>)
-and Fuhquake (<http://www.fuhquake.net/>)
-So thanks to Tonik and Fuh for their great work!
 
 ## New cvars
 
@@ -232,6 +229,19 @@ Sets the color of the crosshair, "79" (red) by default.
 Changes the playback speed of a demo, 1 by default.
 Values < 1 mean slow motion, while > 1 result fast forward.
 
+### `cl_autodemo`, `cl_autodemo_name`
+
+Turns on automatic demo recording.
+If cl_autodemo is 1 and cl_autodemo_name is empty, a new .dem file is recorded at
+every level start. the file naming format is `<map_name>_<date_of_recording>_<time_of_recording>.dem`
+If cl_autodemo is 1 and cl_autodemo_name is not empty, the `<cl_autodemo_name>.dem` file is recorded
+at every level start. To save the current recording session, use the 'keepdemo' command.
+This command is only valid on the intermission/finale screen and renames the temporary recording using the
+following naming format: `<cl_autodemo_name>_<finished_time>_<skill>_<player_name>.dem`
+If cl_autodemo is 2, the naming format changes to the following:
+`<mapname>_<finished_time>_<skill>_<player_name>.dem`
+If cl_autodemo is 0, there is no automatic recording.
+
 ### `cl_maxfps`
 
 Customizes the maximal fps, 72 by default.
@@ -281,6 +291,10 @@ Default value is "1".
 
 Toggles between old and new style weapon bobbing, "0" by default.
 
+### `con_notify_intermission`
+
+Console notify messages are shown on the intermission screen, "0" by default.
+
 ### `gl_fb_bmodels`
 
 Turn fullbright polys on brush models on/off, 1 by default.
@@ -316,6 +330,17 @@ See more info about this at the `loadsky` command.
 
 Sets the transparency of your weapon model when you're invisible.
 Default value is "0.4".
+
+### `r_skyfog`
+
+Applies fog on the sky, valid values are from 0.0 to 1.0. Used implicitly by newer maps.
+It is only used if fog is also applied by using the `fog` command.
+Default value is "0.5".
+
+### `r_noshadow_list`
+
+Ignores drawing shadow for mdl files added to this list.
+Default value is "" (empty list).
 
 ### `capture_codec`
 
@@ -493,16 +518,14 @@ Turns vertical synchronization on/off, "0" by default.
 Smooth out textures on alias models if turned on.
 1 by default.
 
-### `cl_independentphysics` (BETA)
+### `cl_independentphysics`
 
-Server and Client framerates are independent.
-To turn it on you need to start joequake with the following command line:
+Server and Client framerates are independent. This setting is turned on by default.
+To turn it off you need to start joequake with the following command line:
 
 ```
-+set cl_independentphysics 1
++set cl_independentphysics 0
 ```
-
-Its value is 0 by default.
 
 ### `vid_displayfrequency`
 
@@ -524,6 +547,23 @@ default.
 
 Set texture filtering mode for sky textures. Valid modes: `GL_LINEAR` and
 `GL_NEAREST`, `GL_LINEAR` by default.
+
+### `net_connectsearch`
+
+Allows to enable or disable the search for hosts on use of the `connect`
+command. It allows connecting by the server's hostname instead of by IP address.
+However, the search takes a significant amount of time. So disabling it can
+greatly speedup the time it takes to connect to a server by IP address.
+"1" by default. Set to "0" to try to speedup connecting by IP address.
+
+### `net_getdomainname`
+
+Allows to enable or disable trying to find domain names for IP addresses using
+DNS lookups. These can find domain names like nl2.badplace.eu from its IP
+address. However, on Windows this lookup seems to take a long time. Disabling it
+can therefore speed up connecting to a server significantly. As there will
+barely be any usecase for the domain names, it is "0" by default. Set to "1" to
+restore the original Quake behaviour with the lookups enabled.
 
 ## New commands
 
@@ -614,6 +654,10 @@ Stops capturing.
 
 Starts playing a demo and starts capturing it also with the same name.
 
+### `keepdemo`
+
+See description about `cl_autodemo` in the Cvars section.
+
 ### `toggleparticles`
 
 Changes all `gl_part_*` vars' values between 0 (off), 1 (QMB) or 2 (Quake3).
@@ -622,6 +666,16 @@ A pleasant way if you wouldn't like to set all variables one by one.
 ### `toggledecals`
 
 Changes all `gl_decals_*` vars' values to their opposite.
+
+### `fog`
+
+Applies fog to the map. Used implicitly by newer maps.
+Usage:
+`fog <density>`
+`fog <red> <green> <blue>`
+`fog <density> <red> <green> <blue>`
+`<density>` defines the thickness of the fog.
+`<red> <green> <blue>` values define the color of the fog.
 
 ## Other features
 
@@ -648,13 +702,15 @@ Parameter completion works for the following commands:
 None of them require any extension to be given, they'll automatically find
 their filetypes.
 
-### Maps and Demos menu
+### Maps, Demos, Mods menu
 
-JoeQuake added two new menus to Quake:
+JoeQuake added 3 new menus to Quake:
 The Maps menu contains a list of all available maps in the actual path
 including inside pak files as well.
 The Demos menu gives you a shell about all the Quake subdirectories, and you
 may browse between these dirs and watch demos in any folder.
+The Mods menu also shows all the Quake subdirectories, and choosing any of them
+reloads the specific mod immediately (as if you have started Quake `-game <moddir>`)
 
 ### 32bit textures support (GL only)
 
@@ -750,6 +806,7 @@ I would like to thank the following people for using their stuff:
 * Sphere, for his help and participation in development of JoeQuake 🖤
 * A. "Fuh" Nourai, for every FuhQuake addition
 * Anton "Tonik" Gavrilov, for every ZQuake addition
+* John Fitzgibbons, Eric Wasylishen, Spike and all the QuakeSpasm devs for every QS addition
 * fenix@io.com, for alias model interpolation
 * LordHavoc, for lerping alias model textures
 * Alexander Kovalchuk, for plenty of [sons]Quake additions
@@ -764,6 +821,7 @@ I would also like to thank the following people for inspiring, giving ideas:
 * Martin Selinus
 * Nolan Pflug
 * people @ RuneCentral forum, especially Baker and Sputnikutah
+* people @ QuakeSpeedrunning discord channel
 
 ## External resources
 

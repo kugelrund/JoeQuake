@@ -28,6 +28,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #define MAX_LIGHTMAPS		512 //johnfitz -- was 64 
 
 static	int	lightmap_textures;
+int			last_lightmap_allocated;
+int			lightmap_count;
 
 unsigned	blocklights[MAX_LIGHTMAP_SIZE*3];
 
@@ -45,9 +47,6 @@ static	int	allocated[MAX_LIGHTMAPS][BLOCK_WIDTH];
 // the lightmap texture data needs to be kept in
 // main memory so texsubimage can update properly
 byte		lightmaps[3*MAX_LIGHTMAPS*BLOCK_WIDTH*BLOCK_HEIGHT];
-
-msurface_t  *skychain = NULL;
-msurface_t	**skychain_tail = &skychain;
 
 msurface_t  *waterchain = NULL;
 msurface_t	**waterchain_tail = &waterchain;
@@ -70,8 +69,6 @@ msurface_t	**alphachain_tail = &alphachain;
 		(surf)->texturechain = (chain);	\
 		(chain) = (surf);				\
 	}
-
-void R_RenderDynamicLightmaps (msurface_t *fa);
 
 glpoly_t	*fullbright_polys[MAX_GLTEXTURES];
 glpoly_t	*luma_polys[MAX_GLTEXTURES];
@@ -476,6 +473,20 @@ void R_UploadLightMap (int lightmapnum)
 	theRect->w = 0;
 }
 
+void R_UploadLightmaps(void)
+{
+	int lmap;
+
+	for (lmap = 0; lmap < lightmap_count; lmap++)
+	{
+		if (!lightmap_modified[lmap])
+			continue;
+
+		GL_Bind(lightmap_textures + lmap);
+		R_UploadLightMap(lmap);
+	}
+}
+
 /*
 ===============
 R_TextureAnimation
@@ -538,13 +549,12 @@ void R_BlendLightmaps (void)
 
 	Fog_StartAdditive();
 
-	for (i = 0 ; i < MAX_LIGHTMAPS ; i++)
+	for (i = 0 ; i < lightmap_count; i++)
 	{
 		if (!lightmap_polys[i])
 			continue;
+
 		GL_Bind (lightmap_textures + i);
-		if (lightmap_modified[i])
-			R_UploadLightMap (i);
 		for (p = lightmap_polys[i] ; p ; p = p->chain)
 		{
 			glBegin (GL_POLYGON);
@@ -556,7 +566,6 @@ void R_BlendLightmaps (void)
 			}
 			glEnd ();
 		}
-		lightmap_polys[i] = NULL;
 	}
 
 	Fog_StopAdditive();
@@ -578,6 +587,13 @@ void R_RenderDynamicLightmaps (msurface_t *fa)
 	qboolean	lightstyle_modified = false;
 
 	c_brush_polys++;
+
+	if (fa->flags & SURF_DRAWTILED) //johnfitz -- not a lightmapped surface
+		return;
+
+	// add to lightmap chain
+	fa->polys->chain = lightmap_polys[fa->lightmaptexturenum];
+	lightmap_polys[fa->lightmaptexturenum] = fa->polys;
 
 	if (!r_dynamic.value)
 		return;
@@ -713,7 +729,6 @@ void R_DrawAlphaChain (void)
 	for (s = alphachain ; s ; s = s->texturechain)
 	{
 		t = s->texinfo->texture;
-		R_RenderDynamicLightmaps (s);
 
 		// bind the world texture
 		GL_DisableMultitexture ();
@@ -725,11 +740,6 @@ void R_DrawAlphaChain (void)
 			GL_EnableMultitexture ();
 			GL_Bind (lightmap_textures + s->lightmaptexturenum);
 			glTexEnvf (GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_BLEND);
-
-			// update lightmap if its modified by dynamic lights
-			k = s->lightmaptexturenum;
-			if (lightmap_modified[k])
-				R_UploadLightMap (k);
 		}
 
 		glBegin (GL_POLYGON);
@@ -782,8 +792,6 @@ static void R_ClearTextureChains (model_t *clmodel)
 	r_notexture_mip->texturechain[1] = NULL;
 	r_notexture_mip->texturechain_tail[1] = &r_notexture_mip->texturechain[1];
 
-	skychain = NULL;
-	skychain_tail = &skychain;
 	if (clmodel == cl.worldmodel)
 	{
 		waterchain = NULL;
@@ -793,6 +801,40 @@ static void R_ClearTextureChains (model_t *clmodel)
 	}
 	alphachain = NULL;
 	alphachain_tail = &alphachain;
+}
+
+/*
+================
+R_BuildLightmapChains -- johnfitz -- used for r_lightmap 1
+
+ericw -- now always used at the start of R_DrawTextureChains for the
+mh dynamic lighting speedup
+================
+*/
+void R_BuildLightmapChains(model_t *model)
+{
+	texture_t *t;
+	msurface_t *s;
+	int i, waterline;
+
+	// clear lightmap chains (already done in r_marksurfaces, but clearing them here to be safe becuase of r_stereo)
+	for (i = 0; i<MAX_LIGHTMAPS; i++)
+		lightmap_polys[i] = NULL;
+
+	// now rebuild them
+	for (i = 0; i<model->numtextures; i++)
+	{
+		for (waterline = 0; waterline < 2; waterline++)
+		{
+			t = model->textures[i];
+
+			if (!t || !t->texturechain[waterline])
+				continue;
+
+			for (s = t->texturechain[waterline]; s; s = s->texturechain)
+				R_RenderDynamicLightmaps(s);
+		}
+	}
 }
 
 /*
@@ -807,7 +849,15 @@ void DrawTextureChains (model_t *model)
 	msurface_t	*s;
 	texture_t	*t;
 	qboolean	mtex_lightmaps, mtex_fbs, doMtex1, doMtex2, render_lightmaps = false;
-	qboolean	draw_fbs, draw_mtex_fbs, can_mtex_lightmaps, can_mtex_fbs, doAlphaTest;
+	qboolean	draw_fbs, draw_mtex_fbs, can_mtex_lightmaps, can_mtex_fbs;
+
+	// ericw -- the mh dynamic lightmap speedup: make a first pass through all
+	// surfaces we are going to draw, and rebuild any lightmaps that need it.
+	// this also chains surfaces by lightmap which is used by r_lightmap 1.
+	// the previous implementation of the speedup uploaded lightmaps one frame
+	// late which was visible under some conditions, this method avoids that.
+	R_BuildLightmapChains(model);
+	R_UploadLightmaps();
 
 	if (gl_fb_bmodels.value)
 	{
@@ -833,14 +883,6 @@ void DrawTextureChains (model_t *model)
 		// bind the world texture
 		GL_SelectTexture (GL_TEXTURE0_ARB);
 		GL_Bind (t->gl_texturenum);
-
-		doAlphaTest = false;
-		if ((t->texturechain[0] && t->texturechain[0]->flags & SURF_DRAWFENCE) ||
-			(t->texturechain[1] && t->texturechain[1]->flags & SURF_DRAWFENCE))
-		{
-			glEnable(GL_ALPHA_TEST);
-			doAlphaTest = true;
-		}
 
 		draw_fbs = t->isLumaTexture || gl_fb_bmodels.value;
 		draw_mtex_fbs = draw_fbs && can_mtex_fbs;
@@ -912,7 +954,7 @@ void DrawTextureChains (model_t *model)
 
 		for (waterline = 0 ; waterline < 2 ; waterline++)
 		{
-			if (!(s = model->textures[i]->texturechain[waterline]))
+			if (!(s = model->textures[i]->texturechain[waterline]) || s->flags & SURF_DRAWSKY)
 				continue;
 
 			for ( ; s ; s = s->texturechain)
@@ -922,19 +964,6 @@ void DrawTextureChains (model_t *model)
 					// bind the lightmap texture
 					GL_SelectTexture (GL_LIGHTMAP_TEXTURE);
 					GL_Bind (lightmap_textures + s->lightmaptexturenum);
-
-					// update lightmap if its modified by dynamic lights
-					R_RenderDynamicLightmaps (s);
-					k = s->lightmaptexturenum;
-					if (lightmap_modified[k])
-						R_UploadLightMap (k);
-				}
-				else
-				{
-					s->polys->chain = lightmap_polys[s->lightmaptexturenum];
-					lightmap_polys[s->lightmaptexturenum] = s->polys;
-
-					R_RenderDynamicLightmaps (s);
 				}
 
 				glBegin (GL_POLYGON);
@@ -991,9 +1020,6 @@ void DrawTextureChains (model_t *model)
 			GL_DisableTMU (GL_TEXTURE1_ARB);
 		if (doMtex2)
 			GL_DisableTMU (GL_TEXTURE2_ARB);
-
-		if (doAlphaTest)
-			glDisable(GL_ALPHA_TEST);
 	}
 
 	if (gl_mtexable)
@@ -1110,13 +1136,13 @@ void R_DrawBrushModel (entity_t *ent)
 		if (((psurf->flags & SURF_PLANEBACK) && (dot < -BACKFACE_EPSILON)) ||
 			(!(psurf->flags & SURF_PLANEBACK) && (dot > BACKFACE_EPSILON)))
 		{
-			if (psurf->flags & SURF_DRAWSKY)
-			{
-				CHAIN_SURF_B2F(psurf, skychain);
-			}
-			else if (psurf->flags & SURF_DRAWTURB)
+			if (psurf->flags & SURF_DRAWTURB)
 			{
 				EmitTurbulentPolys (psurf);
+			}
+			else if (psurf->flags & SURF_DRAWALPHA) 
+			{
+				CHAIN_SURF_B2F(psurf, alphachain);
 			}
 			else
 			{
@@ -1127,7 +1153,6 @@ void R_DrawBrushModel (entity_t *ent)
 	}
 
 	DrawTextureChains (clmodel);
-	R_DrawSkyChain ();
 	R_DrawAlphaChain ();
 
 	glPopMatrix ();
@@ -1229,11 +1254,7 @@ void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 				continue;		// wrong side
 
 			// if sorting by texture, just store it out
-			if (surf->flags & SURF_DRAWSKY)
-			{
-				CHAIN_SURF_F2B(surf, skychain_tail);
-			}
-			else if (surf->flags & SURF_DRAWTURB)
+			if (surf->flags & SURF_DRAWTURB)
 			{
 				if (!strcmp(surf->texinfo->texture->name, "*teleport"))
 				{
@@ -1243,6 +1264,10 @@ void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 				{
 					CHAIN_SURF_F2B(surf, waterchain_tail);
 				}
+			}
+			else if (surf->flags & SURF_DRAWALPHA) 
+			{
+				CHAIN_SURF_B2F(surf, alphachain);
 			}
 			else
 			{
@@ -1295,8 +1320,10 @@ R_MarkLeaves
 void R_MarkLeaves (void)
 {
 	int		i;
-	byte	*vis, solid[MAX_MAP_LEAFS/8];
+	byte	*vis;
 	mnode_t	*node;
+	static byte *solid;
+	static int solid_capacity;
 
 	if (!r_novis.value && r_oldviewleaf == r_viewleaf && r_oldviewleaf2 == r_viewleaf2)	// watervis hack
 		return;
@@ -1306,8 +1333,7 @@ void R_MarkLeaves (void)
 
 	if (r_novis.value)
 	{
-		vis = solid;
-		memset (solid, 0xff, (cl.worldmodel->numleafs + 7) >> 3);
+		vis = Mod_NoVisPVS(cl.worldmodel);
 	}
 	else
 	{
@@ -1316,10 +1342,21 @@ void R_MarkLeaves (void)
 		if (r_viewleaf2)
 		{
 			int		i, count;
-			unsigned	*src, *dest;
+			unsigned *src, *dest;
 
 			// merge visibility data for two leafs
-			count = (cl.worldmodel->numleafs+7)>>3;
+			count = (cl.worldmodel->numleafs + 7) >> 3;
+			if (solid == NULL || count > solid_capacity)
+			{
+				// Sphere -- we have to allocate in multiples of four bytes,
+				// because a few lines below we will iterate over this in
+				// increments of sizeof(unsigned) which is 4 on the platforms
+				// that are targeted.
+				solid_capacity = NextMultipleOfFour(count);
+				solid = (byte *)Q_realloc(solid, solid_capacity);
+				if (!solid)
+					Sys_Error("R_MarkLeaves: realloc() failed on %d bytes", solid_capacity);
+			}
 			memcpy (solid, vis, count);
 			src = (unsigned *)Mod_LeafPVS (r_viewleaf2, cl.worldmodel);
 			dest = (unsigned *)solid;
@@ -1353,13 +1390,25 @@ void R_MarkLeaves (void)
 ===============================================================================
 */
 
-// returns a texture number and the position inside it
-int AllocBlock (int w, int h, int *x, int *y)
+/*
+========================
+AllocBlock -- returns a texture number and the position inside it
+========================
+*/
+int AllocBlock(int w, int h, int *x, int *y)
 {
 	int	i, j, best, best2, texnum;
 
-	for (texnum=0 ; texnum<MAX_LIGHTMAPS ; texnum++)
+	// ericw -- rather than searching starting at lightmap 0 every time,
+	// start at the last lightmap we allocated a surface in.
+	// This makes AllocBlock much faster on large levels (can shave off 3+ seconds
+	// of load time on a level with 180 lightmaps), at a cost of not quite packing
+	// lightmaps as tightly vs. not doing this (uses ~5% more lightmaps)
+	for (texnum = last_lightmap_allocated; texnum < MAX_LIGHTMAPS; texnum++)
 	{
+		if (texnum == lightmap_count)
+			lightmap_count++;
+
 		best = BLOCK_HEIGHT;
 
 		for (i=0 ; i<BLOCK_WIDTH-w ; i++)
@@ -1386,6 +1435,7 @@ int AllocBlock (int w, int h, int *x, int *y)
 		for (i = 0 ; i < w ; i++)
 			allocated[texnum][*x+i] = best + h;
 
+		last_lightmap_allocated = texnum;
 		return texnum;
 	}
 
@@ -1520,6 +1570,8 @@ void GL_BuildLightmaps (void)
 	memset (allocated, 0, sizeof(allocated));
 
 	r_framecount = 1;		// no dlightcache
+	last_lightmap_allocated = 0;
+	lightmap_count = 0;
 
 	if (!lightmap_textures)
 	{
@@ -1548,7 +1600,7 @@ void GL_BuildLightmaps (void)
  		GL_EnableMultitexture ();
 
 	// upload all lightmaps that were filled
-	for (i = 0 ; i < MAX_LIGHTMAPS ; i++)
+	for (i = 0 ; i < lightmap_count; i++)
 	{
 		if (!allocated[i][0])
 			break;		// no more used

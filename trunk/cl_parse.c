@@ -169,9 +169,14 @@ This error checks and tracks the total number of entities
 */
 entity_t *CL_EntityNum (int num)
 {
+	//johnfitz -- check minimum number too
+	if (num < 0)
+		Host_Error("CL_EntityNum: %i is an invalid number", num);
+	//johnfitz
+	
 	if (num >= cl.num_entities)
 	{
-		if (num >= MAX_EDICTS)
+		if (num >= cl_max_edicts) //johnfitz -- no more MAX_EDICTS 
 			Host_Error ("CL_EntityNum: %i is an invalid number", num);
 
 		while (cl.num_entities <= num)
@@ -224,7 +229,7 @@ void CL_ParseStartSoundPacket (void)
 		Host_Error("CL_ParseStartSoundPacket: %i > MAX_SOUNDS", sound_num);
 	//johnfitz
 
-	if (ent > MAX_EDICTS)
+	if (ent > cl_max_edicts) //johnfitz -- no more MAX_EDICTS 
 		Host_Error ("CL_ParseStartSoundPacket: ent = %i", ent);
 
 	for (i=0 ; i<3 ; i++)
@@ -241,13 +246,14 @@ When the client is taking a long time to load stuff, send keepalive messages
 so the server doesn't disconnect.
 ==================
 */
+static byte net_olddata[NET_MAXMESSAGE];
 void CL_KeepaliveMessage (void)
 {
 	float		time;
 	static float lastmsg;
 	int			ret;
 	sizebuf_t	old;
-	byte		olddata[8192];
+	byte		*olddata;
 	
 	if (sv.active)
 		return;		// no need if server is local
@@ -255,6 +261,7 @@ void CL_KeepaliveMessage (void)
 		return;
 
 // read messages from server, should just be nops
+	olddata = net_olddata;
 	old = net_message;
 	memcpy (olddata, net_message.data, net_message.cursize);
 
@@ -347,8 +354,7 @@ void CL_ParseServerInfo (void)
 	cl.maxclients = MSG_ReadByte ();
 	if (cl.maxclients < 1 || cl.maxclients > MAX_SCOREBOARD)
 	{
-		Con_Printf ("Bad maxclients (%u) from server\n", cl.maxclients);
-		return;
+		Host_Error("Bad maxclients (%u) from server", cl.maxclients);
 	}
 	cl.scores = Hunk_AllocName (cl.maxclients * sizeof(*cl.scores), "scores");
 
@@ -364,7 +370,8 @@ void CL_ParseServerInfo (void)
 	Con_Printf ("%c%s\n", 2, str);
 
 //johnfitz -- tell user which protocol this is
-	Con_Printf("Using protocol %i\n", i);
+	if (cl.protocol != PROTOCOL_NETQUAKE)	//joe: only print to console if not vanilla protocol
+		Con_Printf("Using protocol %i\n", cl.protocol);
 
 // first we go through and touch all of the precache data that still
 // happens to be in the cache, so precaching something else doesn't
@@ -779,7 +786,7 @@ void CL_ParseClientdata ()
 {
 	int	i, j, bits; //johnfitz 
 
-	bits = (unsigned short)MSG_ReadShort(); //johnfitz -- read bits here isntead of in CL_ParseServerMessage() 
+	bits = (unsigned short)MSG_ReadShort(); //johnfitz -- read bits here instead of in CL_ParseServerMessage() 
 
 	//johnfitz -- PROTOCOL_FITZQUAKE
 	if (bits & SU_EXTEND1)
@@ -1125,6 +1132,45 @@ void CL_ParseString (char *string)
 	if (show_stats.value == 3 || show_stats.value == 4)	\
 		(drawstats_limit = cl.time + show_stats_length.value)
 
+char *GetPrintedTime(double time)
+{
+	int			mins;
+	double		secs;
+	static char timestring[16];
+	
+	mins = time / 60;
+	secs = time - (mins * 60);
+	if (mins > 0)
+		Q_snprintfz(timestring, sizeof(timestring), "%i:%08.5lf", mins, secs);
+	else
+		Q_snprintfz(timestring, sizeof(timestring), "%.5lf", secs);
+
+	return timestring;
+}
+
+void PrintFinishTime()
+{
+	char *timestring;
+
+	cls.marathon_time += cl.completed_time;
+	cls.marathon_level++;
+
+	if (!pr_qdqstats)
+	{
+		timestring = GetPrintedTime(cl.completed_time);
+		Con_Printf("\nexact time was %s\n", timestring);
+
+		if (cls.marathon_level > 1)
+		{
+			Con_Printf("level %i in the sequence\n", cls.marathon_level);
+			timestring = GetPrintedTime(cls.marathon_time);
+			Con_Printf("total time is %s\n", timestring);
+		}
+
+		Con_Printf("\n");
+	}
+}
+
 /*
 =====================
 CL_ParseServerMessage
@@ -1362,21 +1408,29 @@ void CL_ParseServerMessage (void)
 
 		case svc_intermission:
 			cl.intermission = 1;
-			// intermission bugfix -- by joe
-			cl.completed_time = cl.mtime[0];
+			cl.completed_time = cl.mtime[0];	//joe: intermission bugfix
 			vid.recalc_refdef = true;	// go to full screen
+			PrintFinishTime();
 			break;
 
 		case svc_finale:
+			if (!cl.intermission)	//joe: only save cl.completed_time if there was no intermission overlay shown already
+			{
+				cl.completed_time = cl.mtime[0];	//joe: intermission bugfix
+				PrintFinishTime();
+			}
 			cl.intermission = 2;
-			cl.completed_time = cl.time;
 			vid.recalc_refdef = true;	// go to full screen
 			SCR_CenterPrint (MSG_ReadString());
 			break;
 
 		case svc_cutscene:
+			if (!cl.intermission)	//joe: only save cl.completed_time if there was no intermission overlay shown already
+			{
+				cl.completed_time = cl.mtime[0];	//joe: intermission bugfix
+				PrintFinishTime();
+			}
 			cl.intermission = 3;
-			cl.completed_time = cl.time;
 			vid.recalc_refdef = true;	// go to full screen
 			SCR_CenterPrint (MSG_ReadString());
 			break;

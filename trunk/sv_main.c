@@ -46,6 +46,8 @@ void SV_Init (void)
 	int	i;
 	const char *p;
 
+	sv.edicts = NULL; // ericw -- sv.edicts switched to use malloc() 
+
 	Cvar_Register (&sv_maxvelocity);
 	Cvar_Register (&sv_gravity);
 	Cvar_Register (&sv_friction);
@@ -165,7 +167,7 @@ void SV_StartSound (edict_t *entity, int channel, char *sample, int volume, floa
 
 	if (sound_num == MAX_SOUNDS || !sv.sound_precache[sound_num])
 	{
-		Con_Printf ("SV_StartSound: %s not precacheed\n", sample);
+		Con_Printf ("SV_StartSound: %s not precached\n", sample);
 		return;
 	}
 
@@ -260,9 +262,7 @@ void SV_SendServerinfo (client_t *client)
 	else
 		MSG_WriteByte (&client->message, GAME_COOP);
 
-	sprintf (message, pr_strings + sv.edicts->v.message);
-
-	MSG_WriteString (&client->message, message);
+	MSG_WriteString (&client->message, PR_GetString(sv.edicts->v.message));
 
 	//johnfitz -- only send the first 256 model and sound precaches if protocol is 15
 	for (i = 0, s = sv.model_precache + 1; *s; s++, i++)
@@ -284,6 +284,12 @@ void SV_SendServerinfo (client_t *client)
 // set view	
 	MSG_WriteByte (&client->message, svc_setview);
 	MSG_WriteShort (&client->message, NUM_FOR_EDICT(client->edict));
+
+// Sphere -- if server is paused we also have to inform the client about that,
+// but only if it was issued by a client through Host_Pause_f (i.e. both
+// sv.paused and cl.paused are true)
+	MSG_WriteByte (&client->message, svc_setpause);
+	MSG_WriteByte (&client->message, sv.paused && cl.paused);
 
 	MSG_WriteByte (&client->message, svc_signonnum);
 	MSG_WriteByte (&client->message, 1);
@@ -409,10 +415,11 @@ crosses a waterline.
 =============================================================================
 */
 
-int	fatbytes;
-byte	fatpvs[MAX_MAP_LEAFS/8];
+static int	fatbytes;
+static byte	*fatpvs;
+static int	fatpvs_capacity;
 
-void SV_AddToFatPVS (vec3_t org, mnode_t *node)
+void SV_AddToFatPVS (vec3_t org, mnode_t *node, model_t *worldmodel) //johnfitz -- added worldmodel as a parameter 
 {
 	int		i;
 	byte		*pvs;
@@ -426,7 +433,7 @@ void SV_AddToFatPVS (vec3_t org, mnode_t *node)
 		{
 			if (node->contents != CONTENTS_SOLID)
 			{
-				pvs = Mod_LeafPVS ((mleaf_t *)node, sv.worldmodel);
+				pvs = Mod_LeafPVS ((mleaf_t *)node, worldmodel); //johnfitz -- worldmodel as a parameter 
 				for (i=0 ; i<fatbytes ; i++)
 					fatpvs[i] |= pvs[i];
 			}
@@ -441,7 +448,7 @@ void SV_AddToFatPVS (vec3_t org, mnode_t *node)
 			node = node->children[1];
 		else
 		{	// go down both
-			SV_AddToFatPVS (org, node->children[0]);
+			SV_AddToFatPVS (org, node->children[0], worldmodel); //johnfitz -- worldmodel as a parameter 
 			node = node->children[1];
 		}
 	}
@@ -455,11 +462,19 @@ Calculates a PVS that is the inclusive or of all leafs within 8 pixels of the
 given point.
 =============
 */
-byte *SV_FatPVS (vec3_t org)
+byte *SV_FatPVS(vec3_t org, model_t *worldmodel) //johnfitz -- added worldmodel as a parameter
 {
-	fatbytes = (sv.worldmodel->numleafs+31)>>3;
-	memset (fatpvs, 0, fatbytes);
-	SV_AddToFatPVS (org, sv.worldmodel->nodes);
+	fatbytes = (worldmodel->numleafs + 7) >> 3; // ericw -- was +31, assumed to be a bug/typo
+	if (fatpvs == NULL || fatbytes > fatpvs_capacity)
+	{
+		fatpvs_capacity = fatbytes;
+		fatpvs = (byte *)Q_realloc(fatpvs, fatpvs_capacity);
+		if (!fatpvs)
+			Sys_Error("SV_FatPVS: realloc() failed on %d bytes", fatpvs_capacity);
+	}
+
+	memset(fatpvs, 0, fatbytes);
+	SV_AddToFatPVS(org, worldmodel->nodes, worldmodel); //johnfitz -- worldmodel as a parameter
 	return fatpvs;
 }
 
@@ -472,7 +487,7 @@ SV_WriteEntitiesToClient
 */
 void SV_WriteEntitiesToClient (edict_t *clent, sizebuf_t *msg, qboolean nomap)
 {
-	int	e, i, bits;
+	int		e, i, bits;
 	float	miss;
 	byte	*pvs;
 	vec3_t	org;
@@ -484,7 +499,7 @@ void SV_WriteEntitiesToClient (edict_t *clent, sizebuf_t *msg, qboolean nomap)
 
 // find the client's PVS
 	VectorAdd (clent->v.origin, clent->v.view_ofs, org);
-	pvs = SV_FatPVS (org);
+	pvs = SV_FatPVS (org, sv.worldmodel);
 
 // send over all entities (excpet the client) that touch the pvs
 	ent = NEXT_EDICT(sv.edicts);
@@ -494,7 +509,7 @@ void SV_WriteEntitiesToClient (edict_t *clent, sizebuf_t *msg, qboolean nomap)
 		if (ent != clent)	// clent is ALWAYS sent
 		{
 			// ignore ents without visible models
-			if (!ent->v.modelindex || !pr_strings[ent->v.model])
+			if (!ent->v.modelindex || !PR_GetString(ent->v.model)[0])
 				continue;
 
 			//johnfitz -- don't send model>255 entities if protocol is 15
@@ -520,9 +535,11 @@ void SV_WriteEntitiesToClient (edict_t *clent, sizebuf_t *msg, qboolean nomap)
 				continue;
 		}
 
-		if (msg->maxsize - msg->cursize < 16)
+		//johnfitz -- max size for protocol 15 is 18 bytes, not 16 as originally
+		//assumed here.  And, for protocol 85 the max size is actually 24 bytes.
+		if (msg->cursize + 24 > msg->maxsize)
 		{
-			Con_Printf("packet overflow\n");
+			Con_Printf("Packet overflow!\n");
 			return;
 		}
 
@@ -570,7 +587,7 @@ void SV_WriteEntitiesToClient (edict_t *clent, sizebuf_t *msg, qboolean nomap)
 				ent->alpha = ENTALPHA_ENCODE(val->_float);
 		}
 		else
-			alpha = 1;
+			alpha = ENTALPHA_DECODE(ent->alpha);
 
 		//don't send invisible entities unless they have effects
 		if (ent->alpha == ENTALPHA_ZERO && !ent->v.effects)
@@ -781,7 +798,7 @@ void SV_WriteClientdataToMessage (edict_t *ent, sizebuf_t *msg)
 	//johnfitz -- PROTOCOL_FITZQUAKE
 	if (sv.protocol != PROTOCOL_NETQUAKE)
 	{
-		if (bits & SU_WEAPON && SV_ModelIndex(pr_strings + ent->v.weaponmodel) & 0xFF00) 
+		if (bits & SU_WEAPON && SV_ModelIndex(PR_GetString(ent->v.weaponmodel)) & 0xFF00)
 			bits |= SU_WEAPON2;
 			
 		if ((int)ent->v.armorvalue & 0xFF00) 
@@ -849,7 +866,7 @@ void SV_WriteClientdataToMessage (edict_t *ent, sizebuf_t *msg)
 	if (bits & SU_ARMOR)
 		MSG_WriteByte (msg, ent->v.armorvalue);
 	if (bits & SU_WEAPON)
-		MSG_WriteByte (msg, SV_ModelIndex(pr_strings + ent->v.weaponmodel));
+		MSG_WriteByte (msg, SV_ModelIndex(PR_GetString(ent->v.weaponmodel)));
 	
 	MSG_WriteShort (msg, ent->v.health);
 	MSG_WriteByte (msg, ent->v.currentammo);
@@ -876,7 +893,7 @@ void SV_WriteClientdataToMessage (edict_t *ent, sizebuf_t *msg)
 
 	//johnfitz -- PROTOCOL_FITZQUAKE
 	if (bits & SU_WEAPON2)
-		MSG_WriteByte(msg, SV_ModelIndex(pr_strings + ent->v.weaponmodel) >> 8);
+		MSG_WriteByte(msg, SV_ModelIndex(PR_GetString(ent->v.weaponmodel)) >> 8);
 	if (bits & SU_ARMOR2)
 		MSG_WriteByte(msg, (int)ent->v.armorvalue >> 8);
 	if (bits & SU_AMMO2)
@@ -1156,7 +1173,7 @@ void SV_CreateBaseline (void)
 		else
 		{
 			svent->baseline.colormap = 0;
-			svent->baseline.modelindex = SV_ModelIndex (pr_strings + svent->v.model);
+			svent->baseline.modelindex = SV_ModelIndex (PR_GetString(svent->v.model));
 			svent->baseline.alpha = svent->alpha; //johnfitz -- alpha support
 		}
 
@@ -1281,11 +1298,14 @@ extern	float	scr_centertime_off;
 
 void SV_SpawnServer (char *server)
 {
+	static char	dummy[LOCALMODELS_STRING_SIZE];
 	int	i;
 	edict_t	*ent;
 	extern	void R_PreMapLoad (char *);
 	extern double sv_frametime;
 	extern double physframetime;
+
+	memset(dummy, 0, sizeof(dummy));
 
 #ifdef GLQUAKE
 	if (nehahra)
@@ -1302,6 +1322,12 @@ void SV_SpawnServer (char *server)
 	if (hostname.string[0] == 0)
 		Cvar_Set (&hostname, "UNNAMED");
 	scr_centertime_off = 0;
+
+	if (!svs.changelevel_issued)	//joe: reset marathon time and counter if not a changelevel call from progs.dat
+	{
+		cls.marathon_time = 0;
+		cls.marathon_level = 0;
+	}
 
 	Con_DPrintf ("SpawnServer: %s\n", server);
 	svs.changelevel_issued = false;		// now safe to issue another
@@ -1321,9 +1347,7 @@ void SV_SpawnServer (char *server)
 // set up the new server
 	Host_ClearMemory ();
 
-	memset (&sv, 0, sizeof(sv));
-
-	strcpy (sv.name, server);
+	Q_strncpyz (sv.name, server, sizeof(sv.name));
 
 	sv.protocol = sv_protocol; // johnfitz 
 
@@ -1340,9 +1364,8 @@ void SV_SpawnServer (char *server)
 	PR_LoadProgs ();
 
 // allocate server memory
-	sv.max_edicts = MAX_EDICTS;
-
-	sv.edicts = Hunk_AllocName (sv.max_edicts * pr_edict_size, "edicts");
+	sv.max_edicts = bound(MIN_EDICTS, (int)max_edicts.value, MAX_EDICTS); //johnfitz -- max_edicts cvar 
+	sv.edicts = (edict_t *)Q_malloc(sv.max_edicts * pr_edict_size); // ericw -- sv.edicts switched to use malloc() 
 
 	sv.datagram.maxsize = sizeof(sv.datagram_buf);
 	sv.datagram.cursize = 0;
@@ -1358,6 +1381,7 @@ void SV_SpawnServer (char *server)
 
 // leave slots at start for clients only
 	sv.num_edicts = svs.maxclients + 1;
+	memset(sv.edicts, 0, sv.num_edicts * pr_edict_size); // ericw -- sv.edicts switched to use malloc() 
 	for (i=0 ; i<svs.maxclients ; i++)
 	{
 		ent = EDICT_NUM(i+1);
@@ -1384,9 +1408,8 @@ void SV_SpawnServer (char *server)
 // clear world interaction links
 	SV_ClearWorld ();
 
-	sv.sound_precache[0] = pr_strings;
-
-	sv.model_precache[0] = pr_strings;
+	sv.sound_precache[0] = dummy;
+	sv.model_precache[0] = dummy;
 	sv.model_precache[1] = sv.modelname;
 	for (i=1 ; i<sv.worldmodel->numsubmodels ; i++)
 	{
@@ -1405,7 +1428,7 @@ void SV_SpawnServer (char *server)
 	ent = EDICT_NUM(0);
 	memset (&ent->v, 0, progs->entityfields * 4);
 	ent->free = false;
-	ent->v.model = sv.worldmodel->name - pr_strings;
+	ent->v.model = PR_SetEngineString(sv.worldmodel->name);
 	ent->v.modelindex = 1;		// world model
 	ent->v.solid = SOLID_BSP;
 	ent->v.movetype = MOVETYPE_PUSH;
@@ -1415,12 +1438,22 @@ void SV_SpawnServer (char *server)
 	else
 		pr_global_struct->deathmatch = deathmatch.value;
 
-	pr_global_struct->mapname = sv.name - pr_strings;
+	pr_global_struct->mapname = PR_SetEngineString(sv.name);
 
 // serverflags are for cross level information (sigils)
 	pr_global_struct->serverflags = svs.serverflags;
 
 	ED_LoadFromFile (sv.worldmodel->entities);
+
+	if (sv.protocol == PROTOCOL_NETQUAKE &&
+		(
+		sv.num_edicts >= 8192 ||
+		sv.num_sound_precaches >= 256 ||
+		sv.num_model_precaches >= 256
+		))
+	{
+		sv.protocol = PROTOCOL_FITZQUAKE;
+	}
 
 	sv.active = true;
 

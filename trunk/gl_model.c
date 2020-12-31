@@ -33,7 +33,11 @@ void Mod_LoadSpriteModel (model_t *mod, void *buffer);
 void Mod_LoadBrushModel (model_t *mod, void *buffer);
 model_t *Mod_LoadModel (model_t *mod, qboolean crash);
 
-byte	mod_novis[MAX_MAP_LEAFS/8];
+static byte	*mod_novis;
+static int	mod_novis_capacity;
+
+static byte	*mod_decompressed;
+static int	mod_decompressed_capacity;
 
 #define	MAX_MOD_KNOWN	2048 //johnfitz -- was 512
 model_t	mod_known[MAX_MOD_KNOWN];
@@ -87,7 +91,6 @@ Mod_Init
 void Mod_Init (void)
 {
 	Cvar_Register (&gl_subdivide_size);
-	memset (mod_novis, 0xff, sizeof(mod_novis));
 }
 
 /*
@@ -147,11 +150,22 @@ Mod_DecompressVis
 byte *Mod_DecompressVis (byte *in, model_t *model)
 {
 	int		c, row;
-	byte	*out;
-	static byte	decompressed[MAX_MAP_LEAFS/8];
+	byte	*out, *outend;
 
 	row = (model->numleafs + 7) >> 3;
-	out = decompressed;
+	if (mod_decompressed == NULL || row > mod_decompressed_capacity)
+	{
+		// Sphere -- we have to allocate in multiples of four bytes, because in
+		// R_MarkLeaves, the result of this function will be iterated over in
+		// increments of sizeof(unsigned) which is 4 on the platforms that
+		// are targeted.
+		mod_decompressed_capacity = NextMultipleOfFour(row);
+		mod_decompressed = (byte *)Q_realloc(mod_decompressed, mod_decompressed_capacity);
+		if (!mod_decompressed)
+			Sys_Error("Mod_DecompressVis: realloc() failed on %d bytes", mod_decompressed_capacity);
+	}
+	out = mod_decompressed;
+	outend = mod_decompressed + row;
 
 #if 0
 	memcpy (out, in, row);
@@ -163,7 +177,7 @@ byte *Mod_DecompressVis (byte *in, model_t *model)
 			*out++ = 0xff;
 			row--;
 		}
-		return decompressed;		
+		return mod_decompressed;
 	}
 
 	do
@@ -178,21 +192,41 @@ byte *Mod_DecompressVis (byte *in, model_t *model)
 		in += 2;
 		while (c)
 		{
+			if (out == outend)
+				return mod_decompressed;
+
 			*out++ = 0;
 			c--;
 		}
-	} while (out - decompressed < row);
+	} while (out - mod_decompressed < row);
 #endif
 	
-	return decompressed;
+	return mod_decompressed;
 }
 
 byte *Mod_LeafPVS (mleaf_t *leaf, model_t *model)
 {
 	if (leaf == model->leafs)
-		return mod_novis;
+		return Mod_NoVisPVS(model);
 
 	return Mod_DecompressVis (leaf->compressed_vis, model);
+}
+
+byte *Mod_NoVisPVS(model_t *model)
+{
+	int pvsbytes;
+
+	pvsbytes = (model->numleafs + 7) >> 3;
+	if (mod_novis == NULL || pvsbytes > mod_novis_capacity)
+	{
+		mod_novis_capacity = NextMultipleOfFour(pvsbytes);
+		mod_novis = (byte *)Q_realloc(mod_novis, mod_novis_capacity);
+		if (!mod_novis)
+			Sys_Error("Mod_NoVisPVS: realloc() failed on %d bytes", mod_novis_capacity);
+
+		memset(mod_novis, 0xff, mod_novis_capacity);
+	}
+	return mod_novis;
 }
 
 /*
@@ -295,7 +329,7 @@ model_t *Mod_LoadModel (model_t *mod, qboolean crash)
 	}
 
 // allocate a new model
-	COM_FileBase (mod->name, loadname);
+	COM_FileBase (mod->name, loadname, sizeof(loadname));
 
 	loadmodel = mod;
 
@@ -363,6 +397,7 @@ qboolean Img_HasFullbrights (byte *pixels, int size)
 
 #define	ISTURBTEX(name)	((name)[0] == '*')
 #define	ISSKYTEX(name)	(!Q_strncasecmp(name, "sky", 3)) //((name)[0] == 's' && (name)[1] == 'k' && (name)[2] == 'y')
+#define ISALPHATEX(name) ((name)[0] == '{')
 
 byte	*mod_base;
 
@@ -1008,7 +1043,7 @@ void Mod_PolyForUnlitSurface(msurface_t *fa)
 		numverts++;
 	}
 
-	//create the poly
+	// create the poly
 	poly = (glpoly_t *)Hunk_Alloc(sizeof(glpoly_t) + (numverts - 4) * VERTEXSIZE * sizeof(float));
 	poly->next = NULL;
 	fa->polys = poly;
@@ -1145,8 +1180,7 @@ void Mod_LoadFaces (lump_t *l, qboolean bsp2)
 		if (ISSKYTEX(out->texinfo->texture->name)) // sky surface //also note -- was Q_strncmp, changed to match qbsp
 		{
 			out->flags |= (SURF_DRAWSKY | SURF_DRAWTILED);
-			//Mod_PolyForUnlitSurface(out); //no more subdivision 
-			GL_SubdivideSurface(out);
+			Mod_PolyForUnlitSurface(out); //no more subdivision 
 		}
 		else if (ISTURBTEX(out->texinfo->texture->name)) // warp surface
 		{
@@ -1170,9 +1204,9 @@ void Mod_LoadFaces (lump_t *l, qboolean bsp2)
 			//Mod_PolyForUnlitSurface(out);
 			GL_SubdivideSurface(out);
 		}
-		else if (out->texinfo->texture->name[0] == '{') // ericw -- fence textures
+		else if (ISALPHATEX(out->texinfo->texture->name))
 		{
-			out->flags |= SURF_DRAWFENCE;
+			out->flags |= SURF_DRAWALPHA;
 		}
 		else if (out->texinfo->flags & TEX_MISSING) // texture is missing from bsp
 		{
@@ -1899,6 +1933,20 @@ void Mod_LoadBrushModel (model_t *mod, void *buffer)
 		VectorCopy (bm->mins, mod->mins);
 
 		mod->radius = RadiusFromBounds(mod->mins, mod->maxs);
+
+		//johnfitz -- correct physics cullboxes so that outlying clip brushes on doors and stuff are handled right
+		if (i > 0 || strcmp(mod->name, sv.modelname) != 0) //skip submodel 0 of sv.worldmodel, which is the actual world
+		{
+			// start with the hull0 bounds
+			VectorCopy(mod->maxs, mod->clipmaxs);
+			VectorCopy(mod->mins, mod->clipmins);
+
+			// process hull1 (we don't need to process hull2 becuase there's
+			// no such thing as a brush that appears in hull2 but not hull1)
+			//Mod_BoundsFromClipNode (mod, 1, mod->hulls[1].firstclipnode); // (disabled for now becuase it fucks up on rotating models)
+		}
+		//johnfitz
+
 		mod->numleafs = bm->visleafs;
 
 		if (i < mod->numsubmodels - 1)
@@ -2249,6 +2297,66 @@ void *Mod_LoadAllSkins (int numskins, daliasskintype_t *pskintype)
 	return (void *)pskintype;
 }
 
+static qboolean nameInList(const char *list, const char *name)
+{
+	const char *s;
+	char tmp[MAX_QPATH];
+	int i;
+
+	s = list;
+
+	while (*s)
+	{
+		// make a copy until the next comma or end of string
+		i = 0;
+		while (*s && *s != ',')
+		{
+			if (i < MAX_QPATH - 1)
+				tmp[i++] = *s;
+			s++;
+		}
+		tmp[i] = '\0';
+		//compare it to the model name
+		if (!strcmp(name, tmp))
+		{
+			return true;
+		}
+		//search forwards to the next comma or end of string
+		while (*s && *s == ',')
+			s++;
+	}
+	return false;
+}
+
+/*
+=================
+Mod_SetExtraFlags -- johnfitz -- set up extra flags that aren't in the mdl
+=================
+*/
+void Mod_SetExtraFlags(model_t *mod)
+{
+	extern cvar_t r_noshadow_list;
+
+	if (!mod || mod->type != mod_alias)
+		return;
+
+	mod->flags &= (0xFF | EF_Q3TRANS); //only preserve first byte, plus EF_Q3TRANS
+
+	// noshadow flag
+	if (nameInList(r_noshadow_list.string, mod->name))
+		mod->flags |= EF_NOSHADOW;
+}
+
+qboolean OnChange_r_noshadow_list(cvar_t *var, char *string)
+{
+	int i;
+	
+	for (i = 0; i < MAX_MODELS; i++)
+		Mod_SetExtraFlags(cl.model_precache[i]);
+
+	return false;
+}
+
 /*
 =================
 Mod_LoadAliasModel
@@ -2416,6 +2524,8 @@ void Mod_LoadAliasModel (model_t *mod, void *buffer)
 	pheader->numposes = posenum;
 
 	mod->type = mod_alias;
+
+	Mod_SetExtraFlags(mod); //johnfitz
 
 	for (i = 0 ; i < 3 ; i++)
 	{
