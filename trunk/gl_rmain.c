@@ -1,4 +1,4 @@
-/*
+﻿/*
 Copyright (C) 1996-1997 Id Software, Inc.
 
 This program is free software; you can redistribute it and/or
@@ -99,6 +99,7 @@ qboolean OnChange_r_skybox (cvar_t *var, char *string);
 cvar_t	r_skybox = {"r_skybox", "", 0, OnChange_r_skybox };
 qboolean OnChange_r_skyfog(cvar_t *var, char *string);
 cvar_t	r_skyfog = { "r_skyfog", "0.5", 0, OnChange_r_skyfog };
+cvar_t	r_scale = { "r_scale", "1" };
 
 cvar_t	gl_clear = {"gl_clear", "0"};
 cvar_t	gl_cull = {"gl_cull", "1"};
@@ -155,6 +156,133 @@ float	q3legs_rot;
 
 void R_MarkLeaves (void);
 void R_InitBubble (void);
+
+//==============================================================================
+//
+// GLSL GAMMA CORRECTION
+//
+//==============================================================================
+
+static GLuint r_gamma_texture;
+static GLuint r_gamma_program;
+static int r_gamma_texture_width, r_gamma_texture_height;
+
+// uniforms used in gamma shader
+static GLuint gammaLoc;
+static GLuint contrastLoc;
+static GLuint textureLoc;
+
+/*
+=============
+GLSLGamma_CreateShaders
+=============
+*/
+static void GLSLGamma_CreateShaders(void)
+{
+	const GLchar *vertSource = \
+		"#version 110\n"
+		"\n"
+		"void main(void) {\n"
+		"	gl_Position = vec4(gl_Vertex.xy, 0.0, 1.0);\n"
+		"	gl_TexCoord[0] = gl_MultiTexCoord0;\n"
+		"}\n";
+
+	const GLchar *fragSource = \
+		"#version 110\n"
+		"\n"
+		"uniform sampler2D GammaTexture;\n"
+		"uniform float GammaValue;\n"
+		"uniform float ContrastValue;\n"
+		"\n"
+		"void main(void) {\n"
+		"	  vec4 frag = texture2D(GammaTexture, gl_TexCoord[0].xy);\n"
+		"	  frag.rgb = frag.rgb * ContrastValue;\n"
+		"	  gl_FragColor = vec4(pow(frag.rgb, vec3(GammaValue)), 1.0);\n"
+		"}\n";
+
+	if (!gl_glsl_gamma_able)
+		return;
+
+	r_gamma_program = GL_CreateProgram(vertSource, fragSource, 0, NULL);
+
+	// get uniform locations
+	gammaLoc = GL_GetUniformLocation(&r_gamma_program, "GammaValue");
+	contrastLoc = GL_GetUniformLocation(&r_gamma_program, "ContrastValue");
+	textureLoc = GL_GetUniformLocation(&r_gamma_program, "GammaTexture");
+}
+
+/*
+=============
+GLSLGamma_GammaCorrect
+=============
+*/
+void GLSLGamma_GammaCorrect(void)
+{
+	float smax, tmax;
+
+	if (!gl_glsl_gamma_able)
+		return;
+
+	if (v_gamma.value == 1 && v_contrast.value == 1)
+		return;
+
+	// create render-to-texture texture if needed
+	if (!r_gamma_texture)
+	{
+		r_gamma_texture = texture_extension_number++;
+		glBindTexture(GL_TEXTURE_2D, r_gamma_texture);
+
+		r_gamma_texture_width = glwidth;
+		r_gamma_texture_height = glheight;
+
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, r_gamma_texture_width, r_gamma_texture_height, 0, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, NULL);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	}
+
+	// create shader if needed
+	if (!r_gamma_program)
+	{
+		GLSLGamma_CreateShaders();
+		if (!r_gamma_program)
+			Sys_Error("GLSLGamma_CreateShaders failed");
+	}
+
+	// copy the framebuffer to the texture
+	GL_DisableMultitexture();
+	glBindTexture(GL_TEXTURE_2D, r_gamma_texture);
+	glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, glx, gly, glwidth, glheight);
+
+	// draw the texture back to the framebuffer with a fragment shader
+	qglUseProgram(r_gamma_program);
+	qglUniform1f(gammaLoc, v_gamma.value);
+	qglUniform1f(contrastLoc, bound(1.0, v_contrast.value, 3.0));
+	qglUniform1i(textureLoc, 0); // use texture unit 0
+
+	glDisable(GL_ALPHA_TEST);
+	glDisable(GL_DEPTH_TEST);
+
+	glViewport(glx, gly, glwidth, glheight);
+
+	smax = glwidth / (float)r_gamma_texture_width;
+	tmax = glheight / (float)r_gamma_texture_height;
+
+	glBegin(GL_QUADS);
+	glTexCoord2f(0, 0);
+	glVertex2f(-1, -1);
+	glTexCoord2f(smax, 0);
+	glVertex2f(1, -1);
+	glTexCoord2f(smax, tmax);
+	glVertex2f(1, 1);
+	glTexCoord2f(0, tmax);
+	glVertex2f(-1, 1);
+	glEnd();
+
+	qglUseProgram(0);
+
+	// clear cached binding
+	currenttexture = -1;
+}
 
 /*
 =================
@@ -463,6 +591,345 @@ float	*shadedots = r_avertexnormal_dots[0];
 
 float	apitch, ayaw;
 
+static GLuint r_alias_program;
+
+// uniforms used in vert shader
+static GLuint blendLoc;
+static GLuint lerpDistLoc;
+static GLuint shadevectorLoc;
+static GLuint lightColorLoc;
+static GLuint useVertexLightingLoc;
+static GLuint shadeLightLoc;
+static GLuint ambientLightLoc;
+static GLuint aPitchLoc;
+static GLuint aYawLoc;
+
+// uniforms used in frag shader
+static GLuint texLoc;
+static GLuint fullbrightTexLoc;
+static GLuint useFullbrightTexLoc;
+static GLuint useAlphaTestLoc;
+
+#define pose1VertexAttrIndex 0
+#define pose1NormalAttrIndex 1
+#define pose2VertexAttrIndex 2
+#define pose2NormalAttrIndex 3
+#define texCoordsAttrIndex 4
+
+/*
+=============
+GLARB_GetXYZOffset
+
+Returns the offset of the first vertex's meshxyz_t.xyz in the vbo for the given
+model and pose.
+=============
+*/
+static void *GLARB_GetXYZOffset(aliashdr_t *hdr, int pose)
+{
+	const int xyzoffs = offsetof(meshxyz_t, xyz);
+	return (void *)(currententity->model->vboxyzofs + (hdr->numverts_vbo * pose * sizeof(meshxyz_t)) + xyzoffs);
+}
+
+/*
+=============
+GLARB_GetNormalOffset
+
+Returns the offset of the first vertex's meshxyz_t.normal in the vbo for the
+given model and pose.
+=============
+*/
+static void *GLARB_GetNormalOffset(aliashdr_t *hdr, int pose)
+{
+	const int normaloffs = offsetof(meshxyz_t, normal);
+	return (void *)(currententity->model->vboxyzofs + (hdr->numverts_vbo * pose * sizeof(meshxyz_t)) + normaloffs);
+}
+
+/*
+=============
+GLAlias_CreateShaders
+=============
+*/
+void GLAlias_CreateShaders(void)
+{
+	const glsl_attrib_binding_t bindings[] = {
+		{ "TexCoords", texCoordsAttrIndex },
+		{ "Pose1Vert", pose1VertexAttrIndex },
+		{ "Pose1Normal", pose1NormalAttrIndex },
+		{ "Pose2Vert", pose2VertexAttrIndex },
+		{ "Pose2Normal", pose2NormalAttrIndex }
+	};
+
+	const GLchar *vertSource = \
+		"#version 150 compatibility\n"
+		"\n"
+		"#define NUMVERTEXNORMALS	162\n"
+		"\n"
+		"uniform float Blend;\n"
+		"uniform float LerpDist;\n"
+		"uniform vec3 ShadeVector;\n"
+		"uniform vec4 LightColor;\n"
+		"uniform bool UseVertexLighting;\n"
+		"uniform float ShadeLight;\n"
+		"uniform float AmbientLight;\n"
+		"uniform float APitch;\n"
+		"uniform float AYaw;\n"
+		"uniform VlightData\n"
+		"{\n"
+		"	int AnormPitch[NUMVERTEXNORMALS];\n"
+		"	int AnormYaw[NUMVERTEXNORMALS];\n"
+		"};\n"
+		"uniform usamplerBuffer VlightTable;\n"
+		"attribute vec4 TexCoords; // only xy are used \n"
+		"attribute vec4 Pose1Vert;\n"
+		"attribute vec3 Pose1Normal;\n"
+		"attribute vec4 Pose2Vert;\n"
+		"attribute vec3 Pose2Normal;\n"
+		"\n"
+		"varying float FogFragCoord;\n"
+		"\n"
+		"float r_avertexnormal_dot(vec3 vertexnormal) // from MH \n"
+		"{\n"
+		"        float dot = dot(vertexnormal, ShadeVector);\n"
+		"        // wtf - this reproduces anorm_dots within as reasonable a degree of tolerance as the >= 0 case\n"
+		"        if (dot < 0.0)\n"
+		"            return 1.0 + dot * (13.0 / 44.0);\n"
+		"        else\n"
+		"            return 1.0 + dot;\n"
+		"}\n"
+		"float R_GetVertexLightValue(int ppitch, int pyaw, float apitch, float ayaw)\n"
+		"{\n"
+		"	int	pitchofs, yawofs, idx;\n"
+		"	float	retval;\n"
+		"\n"
+		"	pitchofs = ppitch + int(apitch * 256 / 360);\n"
+		"	yawofs = pyaw + int(ayaw * 256 / 360);\n"
+		"	while (pitchofs > 255)\n"
+		"		pitchofs -= 256;\n"
+		"	while (yawofs > 255)\n"
+		"		yawofs -= 256;\n"
+		"	while (pitchofs < 0)\n"
+		"		pitchofs += 256;\n"
+		"	while (yawofs < 0)\n"
+		"		yawofs += 256;\n"
+		"\n"
+		"	retval = texelFetch(VlightTable, pitchofs * 256 + yawofs).r;\n"
+		"\n"
+		"	return retval / 256;\n"
+		"}\n"
+		"float R_LerpVertexLight(int ppitch1, int pyaw1, int ppitch2, int pyaw2, float ilerp, float apitch, float ayaw)\n"
+		"{\n"
+		"	float	lightval1, lightval2, val;\n"
+		"\n"
+		"	lightval1 = R_GetVertexLightValue(ppitch1, pyaw1, apitch, ayaw);\n"
+		"	lightval2 = R_GetVertexLightValue(ppitch2, pyaw2, apitch, ayaw);\n"
+		"\n"
+		"	val = (lightval2 * ilerp) + (lightval1 * (1 - ilerp));\n"
+		"\n"
+		"	return val;\n"
+		"}\n"
+		"void main()\n"
+		"{\n"
+		"	gl_TexCoord[0] = TexCoords;\n"
+		"	float lerpfrac;"
+		"	if (distance(Pose1Vert.xyz, Pose2Vert.xyz) < LerpDist)\n"
+		"		lerpfrac = Blend;\n"
+		"	else\n"
+		"		lerpfrac = 1.0;\n"
+		"	vec4 lerpedVert = mix(vec4(Pose1Vert.xyz, 1.0), vec4(Pose2Vert.xyz, 1.0), lerpfrac);\n"
+		"	gl_Position = gl_ModelViewProjectionMatrix * lerpedVert;\n"
+		"	FogFragCoord = gl_Position.w;\n"
+		"	if (UseVertexLighting)\n"
+		"	{\n"
+		"		int pose1_lni = int(Pose1Vert.w);\n"
+		"		int pose2_lni = int(Pose2Vert.w);\n"
+		"		float l = R_LerpVertexLight(AnormPitch[pose1_lni], AnormYaw[pose1_lni], AnormPitch[pose2_lni], AnormYaw[pose2_lni], Blend, APitch, AYaw);\n"
+		"		l = min(l, 1.0);\n"
+		"		gl_FrontColor = vec4(vec3(LightColor.xyz / 256.0 + l), LightColor.w);\n"
+		"	}\n"
+		"	else\n"
+		"	{\n"
+		"		float dot1 = r_avertexnormal_dot(Pose1Normal.xyz);\n"
+		"		float dot2 = r_avertexnormal_dot(Pose2Normal.xyz);\n"
+		"		float l = mix(dot1, dot2, Blend);\n"
+		"		l = (l * ShadeLight + AmbientLight) / 256.0;\n"
+		"		l = min(l, 1.0);\n"
+		"		gl_FrontColor = vec4(vec3(l), LightColor.w);\n"
+		"	}\n"
+		"}\n";
+
+	const GLchar *fragSource = \
+		"#version 150 compatibility\n"
+		"\n"
+		"uniform sampler2D Tex;\n"
+		"uniform sampler2D FullbrightTex;\n"
+		"uniform int UseFullbrightTex;\n"
+		"uniform bool UseAlphaTest;\n"
+		"\n"
+		"varying float FogFragCoord;\n"
+		"\n"
+		"void main()\n"
+		"{\n"
+		"	vec4 result = texture2D(Tex, gl_TexCoord[0].xy);\n"
+		"	if (UseAlphaTest && (result.a < 0.666))\n"
+		"		discard;\n"
+		"	result *= gl_Color;\n"
+		"	vec4 fb = texture2D(FullbrightTex, gl_TexCoord[0].xy);\n"
+		"	if (UseFullbrightTex == 1)\n"
+		"		result = mix(result, fb, fb.a);\n"
+		"	else if (UseFullbrightTex == 2)\n"
+		"		result += fb;\n"
+		"	result = clamp(result, 0.0, 1.0);\n"
+		"	float fog = exp(-gl_Fog.density * gl_Fog.density * FogFragCoord * FogFragCoord);\n"
+		"	fog = clamp(fog, 0.0, 1.0);\n"
+		"	result = mix(gl_Fog.color, result, fog);\n"
+		"	result.a = gl_Color.a;\n" // FIXME: This will make almost transparent things cut holes though heavy fog
+		"	gl_FragColor = result;\n"
+		"}\n";
+
+	if (!(gl_glsl_able && gl_vbo_able && gl_textureunits >= 4))
+		return;
+
+	r_alias_program = GL_CreateProgram(vertSource, fragSource, sizeof(bindings) / sizeof(bindings[0]), bindings);
+
+	if (r_alias_program != 0)
+	{
+		// get uniform locations
+		blendLoc = GL_GetUniformLocation(&r_alias_program, "Blend");
+		lerpDistLoc = GL_GetUniformLocation(&r_alias_program, "LerpDist");
+		shadevectorLoc = GL_GetUniformLocation(&r_alias_program, "ShadeVector");
+		lightColorLoc = GL_GetUniformLocation(&r_alias_program, "LightColor");
+		useVertexLightingLoc = GL_GetUniformLocation(&r_alias_program, "UseVertexLighting");
+		shadeLightLoc = GL_GetUniformLocation(&r_alias_program, "ShadeLight");
+		ambientLightLoc = GL_GetUniformLocation(&r_alias_program, "AmbientLight");
+		aPitchLoc = GL_GetUniformLocation(&r_alias_program, "APitch");
+		aYawLoc = GL_GetUniformLocation(&r_alias_program, "AYaw");
+		texLoc = GL_GetUniformLocation(&r_alias_program, "Tex");
+		fullbrightTexLoc = GL_GetUniformLocation(&r_alias_program, "FullbrightTex");
+		useFullbrightTexLoc = GL_GetUniformLocation(&r_alias_program, "UseFullbrightTex");
+		useAlphaTestLoc = GL_GetUniformLocation(&r_alias_program, "UseAlphaTest");
+
+		// joe: bind uniform buffer here, only once
+		GLuint vlightDataLoc = qglGetUniformBlockIndex(r_alias_program, "VlightData");
+		qglUniformBlockBinding(r_alias_program, vlightDataLoc, 0);
+	}
+}
+
+/*
+=============
+R_DrawAliasFrame_GLSL -- ericw
+
+Optimized alias model drawing codepath.
+Compared to the original GL_DrawAliasFrame, this makes 1 draw call,
+no vertex data is uploaded (it's already in the r_meshvbo and r_meshindexesvbo
+static VBOs), and lerping and lighting is done in the vertex shader.
+
+Supports optional overbright, optional fullbright pixels.
+
+Based on code by MH from RMQEngine
+=============
+*/
+void R_DrawAliasFrame_GLSL(int frame, aliashdr_t *paliashdr, entity_t *ent, int distance, int gl_texture, int fb_texture, qboolean islumaskin)
+{
+	int			pose, numposes;
+
+	if ((frame >= paliashdr->numframes) || (frame < 0))
+	{
+		Con_DPrintf("R_DrawAliasFrame_GLSL: no such frame %d\n", frame);
+		frame = 0;
+	}
+
+	pose = paliashdr->frames[frame].firstpose;
+	numposes = paliashdr->frames[frame].numposes;
+
+	if (numposes > 1)
+	{
+		ent->frame_interval = paliashdr->frames[frame].interval;
+		pose += (int)(cl.time / ent->frame_interval) % numposes;
+	}
+	else
+	{
+		ent->frame_interval = 0.1;
+	}
+
+	if (ent->pose2 != pose)
+	{
+		ent->frame_start_time = cl.time;
+		ent->pose1 = ent->pose2;
+		ent->pose2 = pose;
+		ent->framelerp = 0;
+	}
+	else
+	{
+		ent->framelerp = (cl.time - ent->frame_start_time) / ent->frame_interval;
+	}
+
+	// weird things start happening if blend passes 1
+	if (cl.paused || ent->framelerp > 1)
+		ent->framelerp = 1;
+
+	if (ISTRANSPARENT(ent))
+		glEnable(GL_BLEND);
+
+	qglUseProgram(r_alias_program);
+
+	GL_BindBuffer(GL_ARRAY_BUFFER, currententity->model->meshvbo);
+	GL_BindBuffer(GL_ELEMENT_ARRAY_BUFFER, currententity->model->meshindexesvbo);
+
+	qglEnableVertexAttribArray(texCoordsAttrIndex);
+	qglEnableVertexAttribArray(pose1VertexAttrIndex);
+	qglEnableVertexAttribArray(pose2VertexAttrIndex);
+	qglEnableVertexAttribArray(pose1NormalAttrIndex);
+	qglEnableVertexAttribArray(pose2NormalAttrIndex);
+
+	qglVertexAttribPointer(texCoordsAttrIndex, 2, GL_FLOAT, GL_FALSE, 0, (void *)(intptr_t)currententity->model->vbostofs);
+	qglVertexAttribPointer(pose1VertexAttrIndex, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(meshxyz_t), GLARB_GetXYZOffset(paliashdr, ent->pose1));
+	qglVertexAttribPointer(pose2VertexAttrIndex, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(meshxyz_t), GLARB_GetXYZOffset(paliashdr, ent->pose2));
+	// GL_TRUE to normalize the signed bytes to [-1 .. 1]
+	qglVertexAttribPointer(pose1NormalAttrIndex, 4, GL_BYTE, GL_TRUE, sizeof(meshxyz_t), GLARB_GetNormalOffset(paliashdr, ent->pose1));
+	qglVertexAttribPointer(pose2NormalAttrIndex, 4, GL_BYTE, GL_TRUE, sizeof(meshxyz_t), GLARB_GetNormalOffset(paliashdr, ent->pose2));
+
+	// set uniforms
+	qglUniform1f(blendLoc, ent->framelerp);
+	qglUniform1f(lerpDistLoc, distance);
+	qglUniform3f(shadevectorLoc, shadevector[0], shadevector[1], shadevector[2]);
+	qglUniform4f(lightColorLoc, lightcolor[0], lightcolor[1], lightcolor[2], ent->transparency);
+	qglUniform1i(useVertexLightingLoc, (gl_vertexlights.value && !full_light) ? 1 : 0);
+	qglUniform1f(shadeLightLoc, shadelight);
+	qglUniform1f(ambientLightLoc, ambientlight);
+	qglUniform1f(aPitchLoc, apitch);
+	qglUniform1f(aYawLoc, ayaw);
+	qglUniform1i(texLoc, 0);
+	qglUniform1i(fullbrightTexLoc, 1);
+	qglUniform1i(useFullbrightTexLoc, (fb_texture != 0) ? (islumaskin ? 2 : 1) : 0);
+	qglUniform1i(useAlphaTestLoc, 0);	//joe: not used
+
+	// set textures
+	GL_SelectTexture(GL_TEXTURE0);
+	GL_Bind(gl_texture);
+
+	if (fb_texture)
+	{
+		GL_SelectTexture(GL_TEXTURE1);
+		GL_Bind(fb_texture);
+	}
+
+	// draw
+	glDrawElements(GL_TRIANGLES, paliashdr->numindexes, GL_UNSIGNED_SHORT, (void *)(intptr_t)currententity->model->vboindexofs);
+
+	// clean up
+	qglDisableVertexAttribArray(texCoordsAttrIndex);
+	qglDisableVertexAttribArray(pose1VertexAttrIndex);
+	qglDisableVertexAttribArray(pose2VertexAttrIndex);
+	qglDisableVertexAttribArray(pose1NormalAttrIndex);
+	qglDisableVertexAttribArray(pose2NormalAttrIndex);
+
+	qglUseProgram(0);
+	GL_SelectTexture(GL_TEXTURE0);
+
+	if (ISTRANSPARENT(ent))
+		glDisable(GL_BLEND);
+}
+
 /*
 =============
 R_DrawAliasFrame
@@ -538,8 +1005,8 @@ void R_DrawAliasFrame (int frame, aliashdr_t *paliashdr, entity_t *ent, int dist
 			// texture coordinates come from the draw list
 			if (gl_mtexable)
 			{
-				qglMultiTexCoord2f (GL_TEXTURE0_ARB, ((float *)order)[0], ((float *)order)[1]);
-				qglMultiTexCoord2f (GL_TEXTURE1_ARB, ((float *)order)[0], ((float *)order)[1]);
+				qglMultiTexCoord2f (GL_TEXTURE0, ((float *)order)[0], ((float *)order)[1]);
+				qglMultiTexCoord2f (GL_TEXTURE1, ((float *)order)[0], ((float *)order)[1]);
 			}
 			else
 			{
@@ -977,7 +1444,11 @@ void R_DrawAliasModel (entity_t *ent)
 	if (gl_affinemodels.value)
 		glHint (GL_PERSPECTIVE_CORRECTION_HINT, GL_FASTEST);
 
-	if (fb_texture && gl_mtexable)
+	if (r_alias_program != 0)
+	{
+		R_DrawAliasFrame_GLSL(ent->frame, paliashdr, ent, distance, texture, fb_texture, islumaskin);
+	}
+	else if (fb_texture && gl_mtexable)
 	{
 		GL_DisableMultitexture ();
 		glTexEnvf (GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
@@ -1178,8 +1649,8 @@ int DoWeaponInterpolation (void)
 		if (!interpolated_weapons[i].name[0])
 			return -1;
 
-		if (!Q_strcasecmp(currententity->model->name, va("%s.mdl", interpolated_weapons[i].name)) || 
-		    !Q_strcasecmp(currententity->model->name, va("progs/%s.mdl", interpolated_weapons[i].name)))
+		if (!Q_strcasecmp(currententity->model->name, va("%s.mdl", interpolated_weapons[i].name)) ||
+			!Q_strcasecmp(currententity->model->name, va("progs/%s.mdl", interpolated_weapons[i].name)))
 			return interpolated_weapons[i].maxDistance;
 	}
 
@@ -1499,8 +1970,8 @@ void R_DrawQ3Frame (int frame, md3header_t *pmd3hdr, md3surface_t *pmd3surf, ent
 
 		if (gl_mtexable)
 		{
-			qglMultiTexCoord2f (GL_TEXTURE0_ARB, s, t);
-			qglMultiTexCoord2f (GL_TEXTURE1_ARB, s, t);
+			qglMultiTexCoord2f (GL_TEXTURE0, s, t);
+			qglMultiTexCoord2f (GL_TEXTURE1, s, t);
 		}
 		else
 		{
@@ -2468,8 +2939,6 @@ void R_SetupFrame (void)
 
 	r_framecount++;
 
-	Fog_SetupFrame(); //johnfitz
-
 // build the transformation matrix for the given view angles
 	VectorCopy (r_refdef.vieworg, r_origin);
 	AngleVectors (r_refdef.viewangles, vpn, vright, vup);
@@ -2501,8 +2970,9 @@ void R_SetupFrame (void)
 			r_viewleaf2 = leaf;
 	}
 
+	Fog_SetupFrame(); //johnfitz
+
 	V_SetContentsColor (r_viewleaf->contents);
-	V_AddWaterfog (r_viewleaf->contents);	
 	if (nehahra)
 		Neh_SetupFrame ();
 	V_CalcBlend ();
@@ -2530,12 +3000,13 @@ R_SetupGL
 */
 void R_SetupGL (void)
 {
-	float	screenaspect;
-	int	x, x2, y2, y, w, h, farclip;
+	float	screenaspect, scale;
+	int		x, x2, y2, y, w, h, farclip;
 
 	// set up viewpoint
 	glMatrixMode (GL_PROJECTION);
 	glLoadIdentity ();
+	scale = bound(0.25, r_scale.value, 1);
 	x = r_refdef.vrect.x * glwidth/vid.width;
 	x2 = (r_refdef.vrect.x + r_refdef.vrect.width) * glwidth/vid.width;
 	y = (vid.height - r_refdef.vrect.y) * glheight/vid.height;
@@ -2544,7 +3015,7 @@ void R_SetupGL (void)
 	w = x2 - x;
 	h = y - y2;
 
-	glViewport (glx + x, gly + y2, w, h);
+	glViewport (glx + x, gly + y2, w * scale, h * scale);
 
 	screenaspect = (float)r_refdef.vrect.width/r_refdef.vrect.height;
 	farclip = max((int)r_farclip.value, 4096);
@@ -2608,6 +3079,7 @@ void R_Init (void)
 	Cvar_Register (&r_skybox);
 	Cvar_Register (&r_farclip);
 	Cvar_Register (&r_skyfog);
+	Cvar_Register (&r_scale);
 
 	Cvar_Register (&gl_finish);
 	Cvar_Register (&gl_clear);
@@ -2771,6 +3243,94 @@ void R_Clear (void)
 	}
 }
 
+static GLuint r_scaleview_texture;
+static int r_scaleview_texture_width, r_scaleview_texture_height;
+
+/*
+================
+R_ScaleView
+
+The r_scale cvar allows rendering the 3D view at 1/2, 1/3, or 1/4 resolution.
+This function scales the reduced resolution 3D view back up to fill
+r_refdef.vrect. This is for emulating a low-resolution pixellated look,
+or possibly as a perforance boost on slow graphics cards.
+================
+*/
+void R_ScaleView(void)
+{
+	float	smax, tmax, scale;
+	int		srcx, srcy, srcw, srch;
+
+	// copied from R_SetupGL()
+	scale = bound(0.25, r_scale.value, 1);
+	srcx = glx + r_refdef.vrect.x;
+	srcy = gly + glheight - r_refdef.vrect.y - r_refdef.vrect.height;
+	srcw = r_refdef.vrect.width * scale;
+	srch = r_refdef.vrect.height * scale;
+
+	if (scale == 1)
+		return;
+
+	// make sure texture unit 0 is selected
+	GL_DisableMultitexture();
+
+	// create (if needed) and bind the render-to-texture texture
+	if (!r_scaleview_texture)
+	{
+		r_scaleview_texture = texture_extension_number++;
+
+		r_scaleview_texture_width = 0;
+		r_scaleview_texture_height = 0;
+	}
+	glBindTexture(GL_TEXTURE_2D, r_scaleview_texture);
+
+	// resize render-to-texture texture if needed
+	if (r_scaleview_texture_width < srcw || r_scaleview_texture_height < srch)
+	{
+		r_scaleview_texture_width = srcw;
+		r_scaleview_texture_height = srch;
+
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, r_scaleview_texture_width, r_scaleview_texture_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	}
+
+	// copy the framebuffer to the texture
+	glBindTexture(GL_TEXTURE_2D, r_scaleview_texture);
+	glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, srcx, srcy, srcw, srch);
+
+	// draw the texture back to the framebuffer
+	glDisable(GL_ALPHA_TEST);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_CULL_FACE);
+	glDisable(GL_BLEND);
+
+	glViewport(srcx, srcy, r_refdef.vrect.width, r_refdef.vrect.height);
+
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+
+	// correction factor if we lack NPOT textures, normally these are 1.0f
+	smax = srcw / (float)r_scaleview_texture_width;
+	tmax = srch / (float)r_scaleview_texture_height;
+
+	glBegin(GL_QUADS);
+	glTexCoord2f(0, 0);
+	glVertex2f(-1, -1);
+	glTexCoord2f(smax, 0);
+	glVertex2f(1, -1);
+	glTexCoord2f(smax, tmax);
+	glVertex2f(1, 1);
+	glTexCoord2f(0, tmax);
+	glVertex2f(-1, 1);
+	glEnd();
+
+	// clear cached binding
+	currenttexture = -1;
+}
+
 /*
 ================
 R_RenderView
@@ -2804,6 +3364,8 @@ void R_RenderView (void)
 	R_DrawParticles ();
 	Fog_DisableGFog(); //johnfitz
 	R_DrawViewModel ();
+
+	R_ScaleView();
 
 	if (r_speeds.value)
 	{

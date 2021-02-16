@@ -40,10 +40,11 @@ cvar_t	gl_texturemode = {"gl_texturemode", "GL_LINEAR_MIPMAP_NEAREST", 0, OnChan
 cvar_t	gl_texturemode_hud = {"gl_texturemode_hud", "GL_LINEAR", 0, OnChange_gl_texturemode_hud};
 cvar_t	gl_texturemode_sky = {"gl_texturemode_sky", "GL_LINEAR", 0, OnChange_gl_texturemode_sky};
 
-cvar_t	gl_externaltextures_world = {"gl_externaltextures_world", "1"};
-cvar_t	gl_externaltextures_bmodels = {"gl_externaltextures_bmodels", "1"};
-cvar_t	gl_externaltextures_models = {"gl_externaltextures_models", "1"};
-cvar_t	gl_externaltextures_gfx = { "gl_externaltextures_gfx", "1", CVAR_INIT };
+cvar_t	gl_externaltextures_world = {"gl_externaltextures_world", "0"};
+cvar_t	gl_externaltextures_bmodels = {"gl_externaltextures_bmodels", "0"};
+cvar_t	gl_externaltextures_models = {"gl_externaltextures_models", "0"};
+extern qboolean OnChange_gl_externaltextures_gfx(cvar_t *var, char *string);
+cvar_t	gl_externaltextures_gfx = { "gl_externaltextures_gfx", "0", 0, OnChange_gl_externaltextures_gfx };
 
 qboolean OnChange_gl_crosshairimage (cvar_t *var, char *string);
 cvar_t	gl_crosshairimage = {"crosshairimage", "", 0, OnChange_gl_crosshairimage};
@@ -71,6 +72,8 @@ mpic_t	crosshairpic;
 static qboolean	crosshairimage_loaded = false;
 
 int GL_LoadPicTexture (char *name, mpic_t *pic, byte *data);
+void Draw_InitConback(void);
+void Draw_InitCharset(void);
 
 mpic_t	conback_data;
 mpic_t	*conback = &conback_data;
@@ -280,6 +283,52 @@ byte	menuplyr_pixels[4096];
 int		pic_texels;
 int		pic_count;
 
+// joe: this need to be in sync with the default value of gl_externaltextures_gfx cvar
+qboolean load_external_gfx_textures = false;
+
+void Draw_ReloadPics(void)
+{
+	int			i;
+	cachepic_t	*pic;
+
+	// empty scrap and reallocate gltextures
+	memset(scrap_allocated, 0, sizeof(scrap_allocated));
+	memset(scrap_texels, 255, sizeof(scrap_texels));
+
+	//creates 2 empty gltextures
+	Scrap_Upload();
+
+	// reload wad pics
+	W_LoadWadFile("gfx.wad");
+	Draw_InitConback();
+	Draw_InitCharset();
+	Draw_LoadPics();
+	SCR_LoadPics();
+	Sbar_LoadPics();
+
+	// empty lmp cache
+	for (pic = cachepics, i = 0; i < numcachepics; pic++, i++)
+		pic->name[0] = 0;
+	numcachepics = 0;
+}
+
+qboolean OnChange_gl_externaltextures_gfx(cvar_t *var, char *string)
+{
+	int	newval;
+
+	newval = Q_atoi(string);
+	if (newval == var->value)
+	{
+		Con_Printf("gl_externaltextures_gfx is already set to \"%i\"\n", newval);
+		return true;
+	}
+
+	load_external_gfx_textures = newval;
+	Draw_ReloadPics();
+
+	return false;
+}
+
 mpic_t *Draw_PicFromWad (char *name)
 {
 	qpic_t	*p;
@@ -288,7 +337,7 @@ mpic_t *Draw_PicFromWad (char *name)
 	p = W_GetLumpName (name);
 	pic = (mpic_t *)p;
 
-	if (gl_externaltextures_gfx.value &&
+	if (load_external_gfx_textures &&
 		((pic_24bit = GL_LoadPicImage(va("textures/wad/%s", name), name, 0, 0, TEX_ALPHA)) || 
 	     (pic_24bit = GL_LoadPicImage(va("gfx/%s", name), name, 0, 0, TEX_ALPHA))))
 	{
@@ -366,7 +415,7 @@ mpic_t *Draw_CachePic (char *path)
 	pic->pic.width = dat->width;
 	pic->pic.height = dat->height;
 
-	if (gl_externaltextures_gfx.value && (pic_24bit = GL_LoadPicImage(path, NULL, 0, 0, TEX_ALPHA)) &&
+	if (load_external_gfx_textures && (pic_24bit = GL_LoadPicImage(path, NULL, 0, 0, TEX_ALPHA)) &&
 		(pic_24bit->width / pic_24bit->height) == (pic->pic.width / pic->pic.height))	// do not display hi-res images stretched, instead show the original lmp
 		memcpy(&pic->pic.texnum, &pic_24bit->texnum, sizeof(mpic_t) - 8);
 	else
@@ -397,7 +446,8 @@ void Draw_InitConback (void)
 	if (cb->width != 320 || cb->height != 200)
 		Sys_Error ("Draw_InitConback: conback.lmp size is not 320x200");
 
-	if ((pic_24bit = GL_LoadPicImage("gfx/conback", "conback", 0, 0, 0)))
+	if (load_external_gfx_textures && 
+		(pic_24bit = GL_LoadPicImage("gfx/conback", "conback", 0, 0, 0)))
 	{
 		memcpy (&conback->texnum, &pic_24bit->texnum, sizeof(mpic_t) - 8);
 	}
@@ -562,6 +612,11 @@ done:
 		glTexParameterf (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 		glTexParameterf (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	}
+	else
+	{
+		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	}
 
 	return false;
 }
@@ -655,6 +710,12 @@ qboolean OnChange_gl_crosshairimage (cvar_t *var, char *string)
 	return false;
 }
 
+void Draw_LoadPics(void)
+{
+	draw_disc = Draw_PicFromWad("disc");
+	draw_backtile = Draw_PicFromWad("backtile");
+}
+
 /*
 ===============
 Draw_Init
@@ -709,8 +770,7 @@ void Draw_Init (void)
 	}
 
 	// get the other pics we need
-	draw_disc = Draw_PicFromWad ("disc");
-	draw_backtile = Draw_PicFromWad ("backtile");
+	Draw_LoadPics();
 }
 
 /*
@@ -2184,7 +2244,7 @@ int GL_LoadCharsetImage (char *filename, char *identifier)
 	return texnum;
 }
 
-static	GLenum	oldtarget = GL_TEXTURE0_ARB;
+static	GLenum	oldtarget = GL_TEXTURE0;
 static	int	cnttextures[4] = {-1, -1, -1, -1};     // cached
 static qboolean	mtexenabled = false;
 
@@ -2195,8 +2255,8 @@ void GL_SelectTexture (GLenum target)
 
 	qglActiveTexture (target);
 
-	cnttextures[oldtarget-GL_TEXTURE0_ARB] = currenttexture;
-	currenttexture = cnttextures[target-GL_TEXTURE0_ARB];
+	cnttextures[oldtarget-GL_TEXTURE0] = currenttexture;
+	currenttexture = cnttextures[target-GL_TEXTURE0];
 	oldtarget = target;
 }
 
@@ -2205,7 +2265,7 @@ void GL_DisableMultitexture (void)
 	if (mtexenabled)
 	{
 		glDisable (GL_TEXTURE_2D);
-		GL_SelectTexture (GL_TEXTURE0_ARB);
+		GL_SelectTexture (GL_TEXTURE0);
 		mtexenabled = false;
 	}
 }
@@ -2214,7 +2274,7 @@ void GL_EnableMultitexture (void)
 {
 	if (gl_mtexable)
 	{
-		GL_SelectTexture (GL_TEXTURE1_ARB);
+		GL_SelectTexture (GL_TEXTURE1);
 		glEnable (GL_TEXTURE_2D);
 		mtexenabled = true;
 	}

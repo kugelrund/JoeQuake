@@ -748,8 +748,8 @@ void R_DrawAlphaChain (void)
 		{
 			if (gl_mtexable)
 			{
-				qglMultiTexCoord2f (GL_TEXTURE0_ARB, v[3], v[4]);
-				qglMultiTexCoord2f (GL_TEXTURE1_ARB, v[5], v[6]);
+				qglMultiTexCoord2f (GL_TEXTURE0, v[3], v[4]);
+				qglMultiTexCoord2f (GL_TEXTURE1, v[5], v[6]);
 			}
 			else
 			{
@@ -838,26 +838,485 @@ void R_BuildLightmapChains(model_t *model)
 }
 
 /*
+=============================================================
+
+VBO support
+
+=============================================================
+*/
+
+GLuint gl_bmodel_vbo = 0;
+
+void GL_DeleteBModelVertexBuffer(void)
+{
+	if (!(gl_vbo_able && gl_mtexable && gl_textureunits >= 4))
+		return;
+
+	qglDeleteBuffers(1, &gl_bmodel_vbo);
+	gl_bmodel_vbo = 0;
+
+	GL_ClearBufferBindings();
+}
+
+/*
+==================
+GL_BuildBModelVertexBuffer
+
+Deletes gl_bmodel_vbo if it already exists, then rebuilds it with all
+surfaces from world + all brush models
+==================
+*/
+void GL_BuildBModelVertexBuffer(void)
+{
+	unsigned int numverts, varray_bytes, varray_index;
+	int		i, j;
+	model_t	*m;
+	float	*varray;
+
+	if (!(gl_vbo_able && gl_mtexable && gl_textureunits >= 4))
+		return;
+
+	// ask GL for a name for our VBO
+	qglDeleteBuffers(1, &gl_bmodel_vbo);
+	qglGenBuffers(1, &gl_bmodel_vbo);
+
+	// count all verts in all models
+	numverts = 0;
+	for (j = 1; j<MAX_MODELS; j++)
+	{
+		m = cl.model_precache[j];
+		if (!m || m->name[0] == '*' || m->type != mod_brush)
+			continue;
+
+		for (i = 0; i<m->numsurfaces; i++)
+		{
+			numverts += m->surfaces[i].numedges;
+		}
+	}
+
+	// build vertex array
+	varray_bytes = VERTEXSIZE * sizeof(float) * numverts;
+	varray = (float *)malloc(varray_bytes);
+	varray_index = 0;
+
+	for (j = 1; j<MAX_MODELS; j++)
+	{
+		m = cl.model_precache[j];
+		if (!m || m->name[0] == '*' || m->type != mod_brush)
+			continue;
+
+		for (i = 0; i<m->numsurfaces; i++)
+		{
+			msurface_t *s = &m->surfaces[i];
+			s->vbo_firstvert = varray_index;
+			memcpy(&varray[VERTEXSIZE * varray_index], s->polys->verts, VERTEXSIZE * sizeof(float) * s->numedges);
+			varray_index += s->numedges;
+		}
+	}
+
+	// upload to GPU
+	qglBindBuffer(GL_ARRAY_BUFFER, gl_bmodel_vbo);
+	qglBufferData(GL_ARRAY_BUFFER, varray_bytes, varray, GL_STATIC_DRAW);
+	free(varray);
+
+	// invalidate the cached bindings
+	GL_ClearBufferBindings();
+}
+
+static unsigned int R_NumTriangleIndicesForSurf(msurface_t *s)
+{
+	return 3 * (s->numedges - 2);
+}
+
+/*
 ================
-DrawTextureChains
+R_TriangleIndicesForSurf
+
+Writes out the triangle indices needed to draw s as a triangle list.
+The number of indices it will write is given by R_NumTriangleIndicesForSurf.
 ================
 */
-void DrawTextureChains (model_t *model)
+static void R_TriangleIndicesForSurf(msurface_t *s, unsigned int *dest)
+{
+	int i;
+	for (i = 2; i<s->numedges; i++)
+	{
+		*dest++ = s->vbo_firstvert;
+		*dest++ = s->vbo_firstvert + i - 1;
+		*dest++ = s->vbo_firstvert + i;
+	}
+}
+
+#define MAX_BATCH_SIZE 4096
+
+static unsigned int vbo_indices[MAX_BATCH_SIZE];
+static unsigned int num_vbo_indices;
+
+/*
+================
+R_ClearBatch
+================
+*/
+static void R_ClearBatch()
+{
+	num_vbo_indices = 0;
+}
+
+static GLuint useDetailTexLoc;
+static GLuint useCausticsTexLoc;
+
+/*
+================
+R_FlushBatch
+
+Draw the current batch if non-empty and clears it, ready for more R_BatchSurface calls.
+================
+*/
+static void R_FlushBatch(int waterline)
+{
+	if (num_vbo_indices > 0)
+	{
+		if (waterline && gl_caustics.value && underwatertexture)
+		{
+			GL_SelectTexture(GL_TEXTURE3);
+			GL_Bind(underwatertexture);
+			qglUniform1i(useCausticsTexLoc, 1);
+		}
+		else
+			qglUniform1i(useCausticsTexLoc, 0);
+
+		if (!waterline && gl_detail.value && detailtexture)
+		{
+			GL_SelectTexture(GL_TEXTURE3);
+			GL_Bind(detailtexture);
+			qglUniform1i(useDetailTexLoc, 1);
+		}
+		else
+			qglUniform1i(useDetailTexLoc, 0);
+
+		glDrawElements(GL_TRIANGLES, num_vbo_indices, GL_UNSIGNED_INT, vbo_indices);
+		num_vbo_indices = 0;
+	}
+}
+
+/*
+================
+R_BatchSurface
+
+Add the surface to the current batch, or just draw it immediately if we're not
+using VBOs.
+================
+*/
+static void R_BatchSurface(msurface_t *s, int waterline)
+{
+	int num_surf_indices;
+
+	num_surf_indices = R_NumTriangleIndicesForSurf(s);
+
+	if (num_vbo_indices + num_surf_indices > MAX_BATCH_SIZE)
+		R_FlushBatch(waterline);
+
+	R_TriangleIndicesForSurf(s, &vbo_indices[num_vbo_indices]);
+	num_vbo_indices += num_surf_indices;
+}
+
+static GLuint r_world_program;
+
+// uniforms used in vert shader
+
+// uniforms used in frag shader
+static GLuint texLoc;
+static GLuint LMTexLoc;
+static GLuint fullbrightTexLoc;
+static GLuint detailTexLoc;
+static GLuint causticsTexLoc;
+static GLuint useFullbrightTexLoc;
+static GLuint useAlphaTestLoc;
+static GLuint useWaterFogLoc;
+static GLuint alphaLoc;
+static GLuint clTimeLoc;
+
+#define vertAttrIndex 0
+#define texCoordsAttrIndex 1
+#define LMCoordsAttrIndex 2
+#define detailCoordsAttrIndex 3
+
+/*
+=============
+GLWorld_CreateShaders
+=============
+*/
+void GLWorld_CreateShaders(void)
+{
+	const glsl_attrib_binding_t bindings[] = {
+		{ "Vert", vertAttrIndex },
+		{ "TexCoords", texCoordsAttrIndex },
+		{ "LMCoords", LMCoordsAttrIndex },
+		{ "DetailCoords", detailCoordsAttrIndex }
+	};
+
+	const GLchar *vertSource = \
+		"#version 130\n"
+		"\n"
+		"attribute vec3 Vert;\n"
+		"attribute vec2 TexCoords;\n"
+		"attribute vec2 LMCoords;\n"
+		"attribute vec2 DetailCoords;\n"
+		"\n"
+		"varying float FogFragCoord;\n"
+		"\n"
+		"void main()\n"
+		"{\n"
+		"	gl_TexCoord[0] = vec4(TexCoords, 0.0, 0.0);\n"
+		"	gl_TexCoord[1] = vec4(LMCoords, 0.0, 0.0);\n"
+		"	gl_TexCoord[2] = vec4(DetailCoords.xy, 0.0, 0.0);\n"
+		"	gl_Position = gl_ModelViewProjectionMatrix * vec4(Vert, 1.0);\n"
+		"	FogFragCoord = gl_Position.w;\n"
+		"}\n";
+
+	const GLchar *fragSource = \
+		"#version 130\n"	// required for bitwise operators
+		"\n"
+		"#define M_PI			3.1415926535897932384626433832795\n"
+		"#define TURBSINSIZE	128\n"
+		"#define TURBSCALE		(float(TURBSINSIZE) / (2.0 * M_PI))\n"
+		"\n"
+		"uniform sampler2D Tex;\n"
+		"uniform sampler2D LMTex;\n"
+		"uniform sampler2D FullbrightTex;\n"
+		"uniform sampler2D DetailTex;\n"
+		"uniform sampler2D CausticsTex;\n"
+		"uniform int UseFullbrightTex;\n"
+		"uniform bool UseDetailTex;\n"
+		"uniform bool UseCausticsTex;\n"
+		"uniform bool UseAlphaTest;\n"
+		"uniform int UseWaterFog;\n"
+		"uniform float Alpha;\n"
+		"uniform float ClTime;\n"
+		"uniform int turbsin[TURBSINSIZE] =\n"
+		"{\n"
+		"	127, 133, 139, 146, 152, 158, 164, 170, 176, 182, 187, 193, 198, 203, 208, 213,\n"
+		"	217, 221, 226, 229, 233, 236, 239, 242, 245, 247, 249, 251, 252, 253, 254, 254,\n"
+		"	255, 254, 254, 253, 252, 251, 249, 247, 245, 242, 239, 236, 233, 229, 226, 221,\n"
+		"	217, 213, 208, 203, 198, 193, 187, 182, 176, 170, 164, 158, 152, 146, 139, 133,\n"
+		"	127, 121, 115, 108, 102, 96, 90, 84, 78, 72, 67, 61, 56, 51, 46, 41,\n"
+		"	37, 33, 28, 25, 21, 18, 15, 12, 9, 7, 5, 3, 2, 1, 0, 0,\n"
+		"	0, 0, 0, 1, 2, 3, 5, 7, 9, 12, 15, 18, 21, 25, 28, 33,\n"
+		"	37, 41, 46, 51, 56, 61, 67, 72, 78, 84, 90, 96, 102, 108, 115, 121,\n"
+		"};\n"
+		"\n"
+		"varying float FogFragCoord;\n"
+		"\n"
+		"\n"
+		"float SINTABLE_APPROX(float time)\n"	// caustics effect generation
+		"{\n"
+		"	float sinlerpf, lerptime, lerp;\n"
+		"	int	sinlerp1, sinlerp2;\n"
+		"\n"
+		"	sinlerpf = time * TURBSCALE;\n"
+		"	sinlerp1 = int(floor(sinlerpf));\n"
+		"	sinlerp2 = sinlerp1 + 1;\n"
+		"	lerptime = sinlerpf - sinlerp1;\n"
+		"\n"
+		"	lerp = turbsin[sinlerp1 & (TURBSINSIZE - 1)] * (1 - lerptime) + turbsin[sinlerp2 & (TURBSINSIZE - 1)] * lerptime;\n"
+		"	return -8.0 + 16.0 * lerp / 255.0;\n"
+		"}\n"
+		"void main()\n"
+		"{\n"
+		"	vec4 result = texture2D(Tex, gl_TexCoord[0].xy);\n"
+		"	if (UseAlphaTest && (result.a < 0.666))\n"
+		"		discard;\n"
+		"	result *= 1.0 - texture2D(LMTex, gl_TexCoord[1].xy);\n"
+		"	vec4 fb = texture2D(FullbrightTex, gl_TexCoord[0].xy);\n"
+		"	if (UseFullbrightTex == 1)\n"
+		"		result = mix(result, fb, fb.a);\n"
+		"	else if (UseFullbrightTex == 2)\n"
+		"		result += fb;\n"
+		"	if (UseCausticsTex)\n"
+		"	{\n"
+		"		float s = gl_TexCoord[0].x + SINTABLE_APPROX(0.465 * (ClTime + gl_TexCoord[0].y));\n"
+		"		s *= -3.0 * (0.5 / 64.0);"
+		"		float t = gl_TexCoord[0].y + SINTABLE_APPROX(0.465 * (ClTime + gl_TexCoord[0].x));\n"
+		"		t *= -3.0 * (0.5 / 64.0);"
+		"		vec4 caustics = texture2D(CausticsTex, vec2(s, t));\n"
+		"		result = caustics * result + result * caustics;\n"
+		"	}\n"
+		"	if (UseDetailTex)\n"
+		"	{\n"
+		"		vec4 detail = texture2D(DetailTex, vec2(gl_TexCoord[2].x * 18.0, gl_TexCoord[2].y * 18.0));\n"
+		"		result = detail * result + result * detail;\n"
+		"	}\n"
+		"	result = clamp(result, 0.0, 1.0);\n"
+		"	float fog = 0.0;\n"
+		"	if (UseWaterFog == 1)\n"
+		"		fog = (gl_Fog.end - FogFragCoord) / (gl_Fog.end - gl_Fog.start);\n"
+		"	else if (UseWaterFog == 2)\n"
+		"		fog = exp(-gl_Fog.density * FogFragCoord);\n"
+		"	else\n"
+		"		fog = exp(-gl_Fog.density * gl_Fog.density * FogFragCoord * FogFragCoord);\n"
+		"	fog = clamp(fog, 0.0, 1.0);\n"
+		"	result = mix(gl_Fog.color, result, fog);\n"
+		"	result.a = Alpha;\n" // FIXME: This will make almost transparent things cut holes though heavy fog
+		"	gl_FragColor = result;\n"
+		"}\n";
+
+	if (!(gl_glsl_able && gl_vbo_able && gl_textureunits >= 4))
+		return;
+
+	r_world_program = GL_CreateProgram(vertSource, fragSource, sizeof(bindings) / sizeof(bindings[0]), bindings);
+
+	if (r_world_program != 0)
+	{
+		// get uniform locations
+		texLoc = GL_GetUniformLocation(&r_world_program, "Tex");
+		LMTexLoc = GL_GetUniformLocation(&r_world_program, "LMTex");
+		fullbrightTexLoc = GL_GetUniformLocation(&r_world_program, "FullbrightTex");
+		detailTexLoc = GL_GetUniformLocation(&r_world_program, "DetailTex");
+		causticsTexLoc = GL_GetUniformLocation(&r_world_program, "CausticsTex");
+		useFullbrightTexLoc = GL_GetUniformLocation(&r_world_program, "UseFullbrightTex");
+		useDetailTexLoc = GL_GetUniformLocation(&r_world_program, "UseDetailTex");
+		useCausticsTexLoc = GL_GetUniformLocation(&r_world_program, "UseCausticsTex");
+		useAlphaTestLoc = GL_GetUniformLocation(&r_world_program, "UseAlphaTest");
+		useWaterFogLoc = GL_GetUniformLocation(&r_world_program, "UseWaterFog");
+		alphaLoc = GL_GetUniformLocation(&r_world_program, "Alpha");
+		clTimeLoc = GL_GetUniformLocation(&r_world_program, "ClTime");
+	}
+}
+
+extern GLuint gl_bmodel_vbo;
+
+/*
+================
+DrawTextureChains_GLSL
+================
+*/
+void DrawTextureChains_GLSL(model_t *model)
+{
+	int			i, waterline, lastlightmap, fullbright;
+	msurface_t	*s;
+	texture_t	*t, *at;
+	qboolean	bound, alphaused;
+	entity_t	*ent = currententity;
+
+	qglUseProgram(r_world_program);
+
+	// Bind the buffers
+	GL_BindBuffer(GL_ARRAY_BUFFER, gl_bmodel_vbo);
+	GL_BindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0); // indices come from client memory!
+
+	qglEnableVertexAttribArray(vertAttrIndex);
+	qglEnableVertexAttribArray(texCoordsAttrIndex);
+	qglEnableVertexAttribArray(LMCoordsAttrIndex);
+	qglEnableVertexAttribArray(detailCoordsAttrIndex);
+
+	qglVertexAttribPointer(vertAttrIndex, 3, GL_FLOAT, GL_FALSE, VERTEXSIZE * sizeof(float), ((float *)0));
+	qglVertexAttribPointer(texCoordsAttrIndex, 2, GL_FLOAT, GL_FALSE, VERTEXSIZE * sizeof(float), ((float *)0) + 3);
+	qglVertexAttribPointer(LMCoordsAttrIndex, 2, GL_FLOAT, GL_FALSE, VERTEXSIZE * sizeof(float), ((float *)0) + 5);
+	qglVertexAttribPointer(detailCoordsAttrIndex, 2, GL_FLOAT, GL_FALSE, VERTEXSIZE * sizeof(float), ((float *)0) + 7);
+
+	// set uniforms
+	qglUniform1i(texLoc, 0);
+	qglUniform1i(LMTexLoc, 1);
+	qglUniform1i(fullbrightTexLoc, 2);
+	qglUniform1i(detailTexLoc, 3);
+	qglUniform1i(causticsTexLoc, 3);
+	qglUniform1i(useFullbrightTexLoc, 0);
+	qglUniform1i(useDetailTexLoc, 0);
+	qglUniform1i(useCausticsTexLoc, 0);
+	qglUniform1i(useAlphaTestLoc, 0);
+	qglUniform1i(useWaterFogLoc, (r_viewleaf->contents != CONTENTS_EMPTY && r_viewleaf->contents != CONTENTS_SOLID) ? (int)gl_waterfog.value : 0);
+	qglUniform1f(alphaLoc, ent->transparency);
+	qglUniform1f(clTimeLoc, cl.time);
+
+	for (i = 0 ; i < model->numtextures ; i++)
+	{
+		t = model->textures[i];
+
+		if (!t || (!t->texturechain[0] && !t->texturechain[1]) ||
+			(t->texturechain[0] && t->texturechain[0]->flags & (SURF_DRAWTILED | SURF_NOTEXTURE) &&
+			 t->texturechain[1] && t->texturechain[1]->flags & (SURF_DRAWTILED | SURF_NOTEXTURE)))
+			continue;
+
+		// Enable/disable TMU 2 (fullbrights)
+		// FIXME: Move below to where we bind GL_TEXTURE0
+		at = R_TextureAnimation(t);
+		if (gl_fb_bmodels.value && (fullbright = at->fb_texturenum))
+		{
+			GL_SelectTexture(GL_TEXTURE2);
+			GL_Bind(fullbright);
+			qglUniform1i(useFullbrightTexLoc, at->isLumaTexture ? 2 : 1);
+		}
+		else
+			qglUniform1i(useFullbrightTexLoc, 0);
+
+		R_ClearBatch();
+
+		bound = false;
+		alphaused = false;
+		lastlightmap = 0; // avoid compiler warning
+		for (waterline = 0; waterline < 2; waterline++)
+		{
+			if (!(s = t->texturechain[waterline]) || s->flags & SURF_DRAWSKY)
+				continue;
+
+			for ( ; s ; s = s->texturechain)
+			{
+				if (!bound) //only bind once we are sure we need this texture
+				{
+					GL_SelectTexture(GL_TEXTURE0);
+					GL_Bind(at->gl_texturenum);
+
+					if (!alphaused && s->flags & SURF_DRAWALPHA)
+					{
+						qglUniform1i(useAlphaTestLoc, 1); // Flip alpha test back on
+						alphaused = true;
+					}
+
+					bound = true;
+					lastlightmap = s->lightmaptexturenum;
+				}
+
+				if (s->lightmaptexturenum != lastlightmap)
+					R_FlushBatch(waterline);
+
+				GL_SelectTexture(GL_TEXTURE1);
+				GL_Bind(lightmap_textures + s->lightmaptexturenum);
+				lastlightmap = s->lightmaptexturenum;
+
+				R_BatchSurface(s, waterline);
+			}
+
+			// joe: we need to draw surfaces per waterline because of the caustics (only in-water) and detail (only out-water) textures
+			R_FlushBatch(waterline);
+		}
+
+		if (bound && alphaused)
+			qglUniform1i(useAlphaTestLoc, 0); // Flip alpha test back off
+	}
+
+	// clean up
+	qglDisableVertexAttribArray(vertAttrIndex);
+	qglDisableVertexAttribArray(texCoordsAttrIndex);
+	qglDisableVertexAttribArray(LMCoordsAttrIndex);
+	qglDisableVertexAttribArray(detailCoordsAttrIndex);
+
+	qglUseProgram(0);
+	GL_SelectTexture(GL_TEXTURE0);
+}
+
+/*
+================
+DrawTextureChains_Multitexture
+================
+*/
+void DrawTextureChains_Multitexture (model_t *model)
 {
 	int			i, k, waterline, GL_LIGHTMAP_TEXTURE, GL_FB_TEXTURE;
 	float		*v;
 	msurface_t	*s;
-	texture_t	*t;
+	texture_t	*t, *at;
 	qboolean	mtex_lightmaps, mtex_fbs, doMtex1, doMtex2, render_lightmaps = false;
-	qboolean	draw_fbs, draw_mtex_fbs, can_mtex_lightmaps, can_mtex_fbs;
-
-	// ericw -- the mh dynamic lightmap speedup: make a first pass through all
-	// surfaces we are going to draw, and rebuild any lightmaps that need it.
-	// this also chains surfaces by lightmap which is used by r_lightmap 1.
-	// the previous implementation of the speedup uploaded lightmaps one frame
-	// late which was visible under some conditions, this method avoids that.
-	R_BuildLightmapChains(model);
-	R_UploadLightmaps();
+	qboolean	draw_fbs, draw_mtex_fbs, can_mtex_lightmaps, can_mtex_fbs;//, alphaused;
 
 	if (gl_fb_bmodels.value)
 	{
@@ -875,29 +1334,33 @@ void DrawTextureChains (model_t *model)
 
 	for (i = 0 ; i < model->numtextures ; i++)
 	{
-		if (!model->textures[i] || (!model->textures[i]->texturechain[0] && !model->textures[i]->texturechain[1]))
+		t = model->textures[i];
+
+		if (!t || (!t->texturechain[0] && !t->texturechain[1]) ||
+			(t->texturechain[0] && t->texturechain[0]->flags & (SURF_DRAWTILED | SURF_NOTEXTURE) &&
+			 t->texturechain[1] && t->texturechain[1]->flags & (SURF_DRAWTILED | SURF_NOTEXTURE)))
 			continue;
 
-		t = R_TextureAnimation (model->textures[i]);
+		at = R_TextureAnimation(t);
 
 		// bind the world texture
-		GL_SelectTexture (GL_TEXTURE0_ARB);
-		GL_Bind (t->gl_texturenum);
+		GL_SelectTexture (GL_TEXTURE0);
+		GL_Bind (at->gl_texturenum);
 
-		draw_fbs = t->isLumaTexture || gl_fb_bmodels.value;
+		draw_fbs = at->isLumaTexture || gl_fb_bmodels.value;
 		draw_mtex_fbs = draw_fbs && can_mtex_fbs;
 
 		if (gl_mtexable)
 		{
-			if (t->isLumaTexture && !gl_fb_bmodels.value)
+			if (at->isLumaTexture && !gl_fb_bmodels.value)
 			{
 				if (gl_add_ext)
 				{
 					doMtex1 = true;
-					GL_FB_TEXTURE = GL_TEXTURE1_ARB;
+					GL_FB_TEXTURE = GL_TEXTURE1;
 					GL_EnableTMU (GL_FB_TEXTURE);
 					glTexEnvf (GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_ADD);
-					GL_Bind (t->fb_texturenum);
+					GL_Bind (at->fb_texturenum);
 
 					mtex_lightmaps = can_mtex_lightmaps;
 					mtex_fbs = true;
@@ -905,7 +1368,7 @@ void DrawTextureChains (model_t *model)
 					if (mtex_lightmaps)
 					{
 						doMtex2 = true;
-						GL_LIGHTMAP_TEXTURE = GL_TEXTURE2_ARB;
+						GL_LIGHTMAP_TEXTURE = GL_TEXTURE2;
 						GL_EnableTMU (GL_LIGHTMAP_TEXTURE);
 						glTexEnvf (GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_BLEND);
 					}
@@ -917,7 +1380,7 @@ void DrawTextureChains (model_t *model)
 				}
 				else
 				{
-					GL_DisableTMU (GL_TEXTURE1_ARB);
+					GL_DisableTMU (GL_TEXTURE1);
 					render_lightmaps = true;
 					doMtex1 = doMtex2 = mtex_lightmaps = mtex_fbs = false;
 				}
@@ -925,20 +1388,20 @@ void DrawTextureChains (model_t *model)
 			else
 			{
 				doMtex1 = true;
-				GL_LIGHTMAP_TEXTURE = GL_TEXTURE1_ARB;
+				GL_LIGHTMAP_TEXTURE = GL_TEXTURE1;
 				GL_EnableTMU (GL_LIGHTMAP_TEXTURE);
 				glTexEnvf (GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_BLEND);
 
 				mtex_lightmaps = true;
-				mtex_fbs = t->fb_texturenum && draw_mtex_fbs;
+				mtex_fbs = at->fb_texturenum && draw_mtex_fbs;
 
 				if (mtex_fbs)
 				{
 					doMtex2 = true;
-					GL_FB_TEXTURE = GL_TEXTURE2_ARB;
+					GL_FB_TEXTURE = GL_TEXTURE2;
 					GL_EnableTMU (GL_FB_TEXTURE);
-					GL_Bind (t->fb_texturenum);
-					glTexEnvf (GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, t->isLumaTexture ? GL_ADD : GL_DECAL);
+					GL_Bind (at->fb_texturenum);
+					glTexEnvf (GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, at->isLumaTexture ? GL_ADD : GL_DECAL);
 				}
 				else
 				{
@@ -954,11 +1417,18 @@ void DrawTextureChains (model_t *model)
 
 		for (waterline = 0 ; waterline < 2 ; waterline++)
 		{
-			if (!(s = model->textures[i]->texturechain[waterline]) || s->flags & SURF_DRAWSKY)
+			if (!(s = t->texturechain[waterline]) || s->flags & SURF_DRAWSKY)
 				continue;
 
 			for ( ; s ; s = s->texturechain)
 			{
+				//alphaused = false;
+				//if (!alphaused && s->flags & SURF_DRAWALPHA)
+				//{
+				//	glEnable(GL_ALPHA_TEST);
+				//	alphaused = true;
+				//}
+
 				if (mtex_lightmaps)
 				{
 					// bind the lightmap texture
@@ -972,7 +1442,7 @@ void DrawTextureChains (model_t *model)
 				{
 					if (doMtex1)
 					{
-						qglMultiTexCoord2f (GL_TEXTURE0_ARB, v[3], v[4]);
+						qglMultiTexCoord2f (GL_TEXTURE0, v[3], v[4]);
 
 						if (mtex_lightmaps)
 							qglMultiTexCoord2f (GL_LIGHTMAP_TEXTURE, v[5], v[6]);
@@ -998,18 +1468,18 @@ void DrawTextureChains (model_t *model)
 					s->polys->detail_chain = detail_polys;
 					detail_polys = s->polys;
 				}
-				if (t->fb_texturenum && draw_fbs && !mtex_fbs)
+				if (at->fb_texturenum && draw_fbs && !mtex_fbs)
 				{
-					if (t->isLumaTexture)
+					if (at->isLumaTexture)
 					{
-						s->polys->luma_chain = luma_polys[t->fb_texturenum];
-						luma_polys[t->fb_texturenum] = s->polys;
+						s->polys->luma_chain = luma_polys[at->fb_texturenum];
+						luma_polys[at->fb_texturenum] = s->polys;
 						drawlumas = true;
 					}
 					else
 					{
-						s->polys->fb_chain = fullbright_polys[t->fb_texturenum];
-						fullbright_polys[t->fb_texturenum] = s->polys;
+						s->polys->fb_chain = fullbright_polys[at->fb_texturenum];
+						fullbright_polys[at->fb_texturenum] = s->polys;
 						drawfullbrights = true;
 					}
 				}
@@ -1017,13 +1487,15 @@ void DrawTextureChains (model_t *model)
 		}
 
 		if (doMtex1)
-			GL_DisableTMU (GL_TEXTURE1_ARB);
+			GL_DisableTMU (GL_TEXTURE1);
 		if (doMtex2)
-			GL_DisableTMU (GL_TEXTURE2_ARB);
+			GL_DisableTMU (GL_TEXTURE2);
+		//if (alphaused)
+		//	glDisable(GL_ALPHA_TEST);
 	}
 
 	if (gl_mtexable)
-		GL_SelectTexture (GL_TEXTURE0_ARB);
+		GL_SelectTexture (GL_TEXTURE0);
 
 	if (gl_fb_bmodels.value)
 	{
@@ -1044,8 +1516,34 @@ void DrawTextureChains (model_t *model)
 			R_RenderFullbrights ();
 	}
 
-	EmitCausticsPolys ();
-	EmitDetailPolys ();
+	EmitCausticsPolys();
+	EmitDetailPolys();
+
+	R_DrawAlphaChain();
+}
+
+/*
+================
+DrawTextureChains
+================
+*/
+void DrawTextureChains(model_t *model)
+{
+	// ericw -- the mh dynamic lightmap speedup: make a first pass through all
+	// surfaces we are going to draw, and rebuild any lightmaps that need it.
+	// this also chains surfaces by lightmap which is used by r_lightmap 1.
+	// the previous implementation of the speedup uploaded lightmaps one frame
+	// late which was visible under some conditions, this method avoids that.
+	R_BuildLightmapChains(model);
+	R_UploadLightmaps();
+
+	if (r_world_program != 0)
+	{
+		DrawTextureChains_GLSL(model);
+		return;
+	}
+
+	DrawTextureChains_Multitexture(model);
 }
 
 /*
@@ -1140,7 +1638,7 @@ void R_DrawBrushModel (entity_t *ent)
 			{
 				EmitTurbulentPolys (psurf);
 			}
-			else if (psurf->flags & SURF_DRAWALPHA) 
+			else if (!r_world_program && psurf->flags & SURF_DRAWALPHA) 
 			{
 				CHAIN_SURF_B2F(psurf, alphachain);
 			}
@@ -1153,7 +1651,6 @@ void R_DrawBrushModel (entity_t *ent)
 	}
 
 	DrawTextureChains (clmodel);
-	R_DrawAlphaChain ();
 
 	glPopMatrix ();
 
@@ -1265,7 +1762,7 @@ void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 					CHAIN_SURF_F2B(surf, waterchain_tail);
 				}
 			}
-			else if (surf->flags & SURF_DRAWALPHA) 
+			else if (!r_world_program && surf->flags & SURF_DRAWALPHA)
 			{
 				CHAIN_SURF_B2F(surf, alphachain);
 			}
@@ -1307,9 +1804,6 @@ void R_DrawWorld (void)
 
 	// draw the world
 	DrawTextureChains (cl.worldmodel);
-
-	// draw the world alpha textures
-	R_DrawAlphaChain ();
 }
 
 /*

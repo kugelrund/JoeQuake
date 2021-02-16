@@ -259,6 +259,13 @@ void CL_KeepaliveMessage (void)
 		return;		// no need if server is local
 	if (cls.demoplayback)
 		return;
+	if (!NET_CanSendMessage(cls.netcon))
+		// Sphere -- if we cannot send another message yet, calling
+		// NET_SendMessage below is not allowed and would break things. So we
+		// skip sending a keepalive message for now. Maybe on the next call we
+		// will be allowed to send one again, or maybe we are just loading stuff
+		// so quickly that we dont need a keepalive message.
+		return;
 
 // read messages from server, should just be nops
 	olddata = net_olddata;
@@ -1155,19 +1162,23 @@ void PrintFinishTime()
 	cls.marathon_time += cl.completed_time;
 	cls.marathon_level++;
 
-	if (!pr_qdqstats)
+	if (!pr_qdqstats && !cls.demoplayback && sv.active)
 	{
+		// Sphere --- calling SV_ from CL_ here is probably not the best, but at
+		// least we check for sv.active. We need the broadcast so that the time
+		// messages appear in recorded demos and also get sent to clients
+		// during coop play.
 		timestring = GetPrintedTime(cl.completed_time);
-		Con_Printf("\nexact time was %s\n", timestring);
+		SV_BroadcastPrintf("\nexact time was %s\n", timestring);
 
 		if (cls.marathon_level > 1)
 		{
-			Con_Printf("level %i in the sequence\n", cls.marathon_level);
+			SV_BroadcastPrintf("level %i in the sequence\n", cls.marathon_level);
 			timestring = GetPrintedTime(cls.marathon_time);
-			Con_Printf("total time is %s\n", timestring);
+			SV_BroadcastPrintf("total time is %s\n", timestring);
 		}
 
-		Con_Printf("\n");
+		SV_BroadcastPrintf("\n");
 	}
 }
 
