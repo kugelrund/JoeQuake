@@ -864,6 +864,9 @@ void SV_Physics_Client (edict_t	*ent, int num)
 	if (!svs.clients[num-1].active)
 		return;		// unconnected slot
 
+	if (SV_IsSpectating(&svs.clients[num-1]))
+		return;
+
 // call standard client pre-think
 	pr_global_struct->time = sv.time;
 	pr_global_struct->self = EDICT_TO_PROG(ent);

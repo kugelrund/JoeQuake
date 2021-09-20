@@ -453,6 +453,7 @@
     <ClCompile Include="sv_main.c" />
     <ClCompile Include="sv_move.c" />
     <ClCompile Include="sv_phys.c" />
+    <ClCompile Include="sv_spectate.c" />
     <ClCompile Include="sv_user.c" />
     <ClCompile Include="pr_cmds.c" />
     <ClCompile Include="pr_edict.c" />

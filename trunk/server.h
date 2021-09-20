@@ -77,6 +77,14 @@ typedef struct
 	unsigned	protocolflags;
 } server_t;
 
+// Sphere -- Support for spectating
+struct spectator_state
+{
+	// representation of the spectator state. do not use directly, only use the
+	// SV_* functions for spectating.
+	int repr;
+};
+
 #define	NUM_PING_TIMES		16
 #define	NUM_SPAWN_PARMS		16
 
@@ -117,6 +125,9 @@ typedef struct client_s
 
 	// joe, from ProQuake: allow clients to connect if they don't have the map
 	qboolean	nomap;
+
+	// Sphere -- Support for spectating
+	struct spectator_state spec_state;
 } client_t;
 
 //=============================================================================
@@ -249,3 +260,12 @@ void SV_CheckForNewClients (void);
 void SV_RunClients (void);
 void SV_SaveSpawnparms ();
 void SV_SpawnServer (char *server);
+
+// Sphere -- Support for spectating
+qboolean SV_IsSpectating (const client_t *client);
+client_t* SV_GetSpectatedClient (const client_t *client);
+qboolean SV_SetSpectator (client_t *client);
+void SV_UnsetSpectator (client_t *client);
+void SV_SpectateNext (client_t *client);
+void SV_SpectatePrevious (client_t *client);
+void SV_HandleNewSpectatedClient (client_t *client);

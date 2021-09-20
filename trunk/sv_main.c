@@ -492,6 +492,7 @@ void SV_WriteEntitiesToClient (edict_t *clent, sizebuf_t *msg, qboolean nomap)
 	byte	*pvs;
 	vec3_t	org;
 	edict_t	*ent;
+	edict_t *ent_orig;
 #ifdef GLQUAKE
 	float	alpha, fullbright;
 	eval_t  *val;
@@ -499,12 +500,22 @@ void SV_WriteEntitiesToClient (edict_t *clent, sizebuf_t *msg, qboolean nomap)
 
 // find the client's PVS
 	VectorAdd (clent->v.origin, clent->v.view_ofs, org);
+	if (SV_IsSpectating(host_client))
+	{
+		const client_t *spectated_client = SV_GetSpectatedClient(host_client);
+		VectorAdd (spectated_client->edict->v.origin, spectated_client->edict->v.view_ofs, org);
+	}
 	pvs = SV_FatPVS (org, sv.worldmodel);
 
 // send over all entities (excpet the client) that touch the pvs
 	ent = NEXT_EDICT(sv.edicts);
 	for (e = 1; e < sv.num_edicts; e++, ent = NEXT_EDICT(ent))
 	{
+		if (SV_IsSpectating(host_client) &&
+		    ent == SV_GetSpectatedClient(host_client)->edict)
+			continue;
+
+		ent_orig = ent;
 		// ignore if not touching a PV leaf
 		if (ent != clent)	// clent is ALWAYS sent
 		{
@@ -533,6 +544,11 @@ void SV_WriteEntitiesToClient (edict_t *clent, sizebuf_t *msg, qboolean nomap)
 			// joe, from ProQuake: don't send updates if the client doesn't have the map
 			if (nomap)
 				continue;
+		}
+		else
+		{
+			if (SV_IsSpectating(host_client))
+				ent = SV_GetSpectatedClient(host_client)->edict;
 		}
 
 		//johnfitz -- max size for protocol 15 is 18 bytes, not 16 as originally
@@ -701,6 +717,7 @@ void SV_WriteEntitiesToClient (edict_t *clent, sizebuf_t *msg, qboolean nomap)
 		if (bits & U_LERPFINISH)
 			MSG_WriteByte(msg, (byte)(Q_rint((ent->v.nextthink - sv.time) * 255)));
 		//johnfitz
+		ent = ent_orig;
 	}
 }
 
@@ -754,6 +771,14 @@ void SV_WriteClientdataToMessage (edict_t *ent, sizebuf_t *msg)
 		for (i=0 ; i<3 ; i++)
 			MSG_WriteAngle (msg, ent->v.angles[i], sv.protocolflags);
 		ent->v.fixangle = 0;
+	}
+
+	if (SV_IsSpectating(host_client))
+	{
+		ent = SV_GetSpectatedClient(host_client)->edict;
+		MSG_WriteByte (msg, svc_setangle);
+		for (i=0 ; i<3 ; i++)
+			MSG_WriteAngle (msg, ent->v.v_angle[i], sv.protocolflags);
 	}
 
 	bits = 0;
@@ -1018,6 +1043,39 @@ void SV_SendNop (client_t *client)
 }
 
 /*
+===========================
+SV_SetupSpectatorMessages
+===========================
+*/
+static void SV_SetupSpectatorMessages (void)
+{
+	int i;
+	for (i=0, host_client = svs.clients ; i<svs.maxclients ; i++, host_client++)
+	{
+		if (!host_client->active || !host_client->spawned ||
+		    host_client->sendsignon || !SV_IsSpectating(host_client))
+			continue;
+
+		const client_t* spectated_client = SV_GetSpectatedClient(host_client);
+		if (!spectated_client->active || !spectated_client->spawned ||
+		    spectated_client->sendsignon)
+			continue;
+
+		// if this is a spectator and both the spectator and the spectated player
+		// are connected and ready to receive stuff, then copy all messages for
+		// the spectated player to the spectator so that the spectator receives
+		// exactly everything that the spectated client receives
+		SZ_Clear(&host_client->message);
+		SZ_Write(&host_client->message,
+			spectated_client->message.data, spectated_client->message.cursize);
+
+		// also check if we are just now spectating a new, different client.
+		// if so, do stuff like sending a message who we are now spectating.
+		SV_HandleNewSpectatedClient(host_client);
+	}
+}
+
+/*
 =======================
 SV_SendClientMessages
 =======================
@@ -1028,6 +1086,9 @@ void SV_SendClientMessages (void)
 	
 // update frags, names, etc
 	SV_UpdateToReliableMessages ();
+
+// make sure that spectators receive exactly what the spectated players receive
+	SV_SetupSpectatorMessages ();
 
 // build individual updates
 	for (i=0, host_client = svs.clients ; i<svs.maxclients ; i++, host_client++)

@@ -756,7 +756,10 @@ void Host_Name_f (void)
 // send notification to all clients
 	MSG_WriteByte (&sv.reliable_datagram, svc_updatename);
 	MSG_WriteByte (&sv.reliable_datagram, host_client - svs.clients);
-	MSG_WriteString (&sv.reliable_datagram, host_client->name);
+	if (SV_IsSpectating(host_client))
+		MSG_WriteString (&sv.reliable_datagram, va("[SPEC] %s", host_client->name));
+	else
+		MSG_WriteString (&sv.reliable_datagram, host_client->name);
 }
 
 void Host_Say (qboolean teamonly)
@@ -1115,15 +1118,22 @@ void Host_Spawn_f (void)
 		for (i=0 ; i<NUM_SPAWN_PARMS ; i++)
 			(&pr_global_struct->parm1)[i] = host_client->spawn_parms[i];
 
-		// call the spawn function
-		pr_global_struct->time = sv.time;
-		pr_global_struct->self = EDICT_TO_PROG(sv_player);
-		PR_ExecuteProgram (pr_global_struct->ClientConnect);
+		if (SV_IsSpectating(host_client))
+		{
+			host_client->spawned = true;
+		}
+		else
+		{
+			// call the spawn function
+			pr_global_struct->time = sv.time;
+			pr_global_struct->self = EDICT_TO_PROG(sv_player);
+			PR_ExecuteProgram (pr_global_struct->ClientConnect);
 
-		if ((Sys_DoubleTime() - host_client->netconnection->connecttime) <= sv.time)
-			Sys_Printf ("%s entered the game\n", host_client->name);
+			if ((Sys_DoubleTime() - host_client->netconnection->connecttime) <= sv.time)
+				Sys_Printf ("%s entered the game\n", host_client->name);
 
-		PR_ExecuteProgram (pr_global_struct->PutClientInServer);	
+			PR_ExecuteProgram (pr_global_struct->PutClientInServer);
+		}
 	}
 
 // send all current names, colors, and frag counts
@@ -1137,7 +1147,10 @@ void Host_Spawn_f (void)
 	{
 		MSG_WriteByte (&host_client->message, svc_updatename);
 		MSG_WriteByte (&host_client->message, i);
-		MSG_WriteString (&host_client->message, client->name);
+		if (SV_IsSpectating(client))
+			MSG_WriteString (&host_client->message, va("[SPEC] %s", client->name));
+		else
+			MSG_WriteString (&host_client->message, client->name);
 		MSG_WriteByte (&host_client->message, svc_updatefrags);
 		MSG_WriteByte (&host_client->message, i);
 		MSG_WriteShort (&host_client->message, client->old_frags);
@@ -1177,6 +1190,8 @@ void Host_Spawn_f (void)
 // and it won't happen if the game was just loaded, so you wind up
 // with a permanent head tilt
 	ent = EDICT_NUM(1 + (host_client - svs.clients));
+	if (SV_IsSpectating(host_client))
+		ent = EDICT_NUM(1 + (SV_GetSpectatedClient(host_client) - svs.clients));
 	MSG_WriteByte (&host_client->message, svc_setangle);
 	for (i=0 ; i<2 ; i++)
 		MSG_WriteAngle (&host_client->message, ent->v.angles[i], sv.protocolflags);
@@ -1297,6 +1312,76 @@ void Host_Kick_f (void)
 	}
 
 	host_client = save;
+}
+
+/*
+========================
+Host_ToggleSpectator_f
+
+Toggle spectator state for a client. Make them a spectator if they are a normal
+player right now and make them a normal player if they are a spectator right now.
+========================
+*/
+void Host_ToggleSpectator_f (void)
+{
+	int		i;
+	client_t	*new_spectator;
+
+	if (!sv.active)
+		return;
+
+	if (Cmd_Argc() > 2 && !strcmp(Cmd_Argv(1), "#"))
+	{
+		i = Q_atof(Cmd_Argv(2)) - 1;
+		if (i < 0 || i >= svs.maxclients)
+			return;
+		if (!svs.clients[i].active)
+			return;
+	}
+	else
+	{
+		for (i = 0; i != svs.maxclients; ++i)
+		{
+			if (!svs.clients[i].active)
+				continue;
+			if (!Q_strcasecmp(svs.clients[i].name, Cmd_Argv(1)))
+				break;
+		}
+	}
+
+	if (i == svs.maxclients)
+		return;
+
+	new_spectator = svs.clients + i;
+	if (SV_IsSpectating(new_spectator))
+	{
+		// disable spectator mode for this client
+		SV_UnsetSpectator(new_spectator);
+		// call the spawn function
+		pr_global_struct->time = sv.time;
+		pr_global_struct->self = EDICT_TO_PROG(new_spectator->edict);
+		PR_ExecuteProgram (pr_global_struct->ClientConnect);
+		Sys_Printf ("%s entered the game\n", new_spectator->name);
+		PR_ExecuteProgram (pr_global_struct->PutClientInServer);
+	}
+	else
+	{
+		if (new_spectator->edict && new_spectator->spawned && SV_SetSpectator(new_spectator))
+		{
+			// call the prog function for removing a client
+			// this will set the body to a dead frame, among other things
+			pr_global_struct->time = sv.time;
+			pr_global_struct->self = EDICT_TO_PROG(new_spectator->edict);
+			PR_ExecuteProgram (pr_global_struct->ClientDisconnect);
+		}
+	}
+
+	MSG_WriteByte (&sv.reliable_datagram, svc_updatename);
+	MSG_WriteByte (&sv.reliable_datagram, new_spectator - svs.clients);
+	if (SV_IsSpectating(new_spectator))
+		MSG_WriteString (&sv.reliable_datagram, va("[SPEC] %s", new_spectator->name));
+	else
+		MSG_WriteString (&sv.reliable_datagram, new_spectator->name);
 }
 
 /*
@@ -1741,6 +1826,7 @@ void Host_InitCommands (void)
 	Cmd_AddCommand ("begin", Host_Begin_f);
 	Cmd_AddCommand ("prespawn", Host_PreSpawn_f);
 	Cmd_AddCommand ("kick", Host_Kick_f);
+	Cmd_AddCommand ("togglespec", Host_ToggleSpectator_f);
 	Cmd_AddCommand ("ping", Host_Ping_f);
 	Cmd_AddCommand ("load", Host_Loadgame_f);
 	Cmd_AddCommand ("save", Host_Savegame_f);

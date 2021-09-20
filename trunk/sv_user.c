@@ -390,6 +390,35 @@ void SV_ClientThink (void)
 
 /*
 ===================
+SV_SpectatorThink
+===================
+*/
+void SV_SpectatorThink (void)
+{
+	if (sv.time < host_client->edict->v.teleport_time)
+	{
+		if (host_client->cmd.forwardmove == 0)
+			host_client->edict->v.teleport_time = 0.0;
+		return;
+	}
+
+	// time in seconds until switching again when the key is being held down
+	const double hold_time_delay = 0.5;
+
+	if (host_client->cmd.forwardmove > 0)
+	{
+		SV_SpectateNext(host_client);
+		host_client->edict->v.teleport_time = sv.time + hold_time_delay;
+	}
+	else if (host_client->cmd.forwardmove < 0)
+	{
+		SV_SpectatePrevious(host_client);
+		host_client->edict->v.teleport_time = sv.time + hold_time_delay;
+	}
+}
+
+/*
+===================
 SV_ReadClientMove
 ===================
 */
@@ -562,6 +591,11 @@ void SV_RunClients (void)
 
 	// always pause in single player if in console or menus
 		if (!sv.paused && (svs.maxclients > 1 || key_dest == key_game))
-			SV_ClientThink ();
+		{
+			if (SV_IsSpectating(host_client))
+				SV_SpectatorThink ();
+			else
+				SV_ClientThink ();
+		}
 	}
 }
