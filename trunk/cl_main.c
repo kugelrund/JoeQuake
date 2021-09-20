@@ -710,7 +710,7 @@ void CL_RelinkEntities (void)
 	for (i = 0 ; i < 3 ; i++)
 		cl.velocity[i] = cl.mvelocity[1][i] + frac * (cl.mvelocity[0][i] - cl.mvelocity[1][i]);
 
-	if (cls.demoplayback)
+	if (cls.demoplayback || CL_SpectateIsSmoothingEnabled())
 	{
 		// interpolate the angles
 		for (j = 0 ; j < 3 ; j++)
@@ -1364,6 +1364,7 @@ void CL_Init (void)
 	CL_InitInput ();
 	CL_InitModelnames ();
 	CL_InitTEnts ();
+	CL_InitSpectate ();
 
 // register our commands
 	Cvar_Register (&cl_name);

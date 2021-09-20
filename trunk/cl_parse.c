@@ -1300,6 +1300,11 @@ void CL_ParseServerMessage (void)
 				VectorCopy(cl.mviewangles[0], cl.mviewangles[1]);
 				cl.mviewangles[0][0] = cl.mviewangles[1][0] = cl.viewangles[0] = -cl.viewangles[0];
 			}
+			else
+			{
+				//Sphere: smoothing of the viewangle for spectating feature
+				CL_SpectateViewangleSmoothing();
+			}
 			break;
 
 		case svc_setview:

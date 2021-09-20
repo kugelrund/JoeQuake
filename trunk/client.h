@@ -396,6 +396,11 @@ void CL_UpdateTEnts (void);
 entity_t *CL_NewTempEntity (void);
 qboolean TraceLineN (vec3_t start, vec3_t end, vec3_t impact, vec3_t normal);
 
+// Sphere --- cl_spectate.c
+qboolean CL_SpectateIsSmoothingEnabled (void);
+void CL_SpectateViewangleSmoothing (void);
+void CL_InitSpectate (void);
+
 #ifdef GLQUAKE
 dlighttype_t SetDlightColor (float f, dlighttype_t def, qboolean random);
 #endif

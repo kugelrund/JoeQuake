@@ -135,6 +135,9 @@
     <ClCompile Include="cl_slist.c">
       <Filter>Source Files\Client</Filter>
     </ClCompile>
+    <ClCompile Include="cl_spectate.c">
+      <Filter>Source Files\Client</Filter>
+    </ClCompile>
     <ClCompile Include="cl_tent.c">
       <Filter>Source Files\Client</Filter>
     </ClCompile>
