@@ -62,6 +62,7 @@ cvar_t	cl_independentphysics = {"cl_independentphysics", "1", CVAR_INIT};
 cvar_t	cl_viewweapons = {"cl_viewweapons", "0"};
 cvar_t	cl_autodemo = { "cl_autodemo", "0" };
 cvar_t	cl_autodemo_name = { "cl_autodemo_name", "" };
+cvar_t	cl_recordserverview = { "cl_recordserverview", "0" };
 
 client_static_t	cls;
 client_state_t	cl;
@@ -1409,6 +1410,7 @@ void CL_Init (void)
 	Cvar_Register (&cl_viewweapons);
 	Cvar_Register(&cl_autodemo);
 	Cvar_Register(&cl_autodemo_name);
+	Cvar_Register(&cl_recordserverview);
 
 	if (COM_CheckParm("-noindphys"))
 	{

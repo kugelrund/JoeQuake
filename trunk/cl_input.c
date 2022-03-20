@@ -421,6 +421,7 @@ void CL_SendMove (usercmd_t *cmd)
 		for (i = 0 ; i < 3 ; i++)
 			MSG_WriteAngle (buf, cl.viewangles[i], cl.protocolflags);
 	}
+	VectorCopy(cl.viewangles, cl.serverviewangles);
 
 	MSG_WriteShort (buf, cmd->forwardmove);
 	MSG_WriteShort (buf, cmd->sidemove);

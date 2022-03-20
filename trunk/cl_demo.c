@@ -113,7 +113,11 @@ void CL_WriteDemoMessage (void)
 	fwrite (&len, 4, 1, cls.demofile);
 	for (i=0 ; i<3 ; i++)
 	{
-		f = LittleFloat (cl.viewangles[i]);
+		extern cvar_t cl_recordserverview;
+		if (cl_recordserverview.value)
+			f = LittleFloat (cl.serverviewangles[i]);
+		else
+			f = LittleFloat (cl.viewangles[i]);
 		fwrite (&f, 4, 1, cls.demofile);
 	}
 	fwrite (net_message.data, net_message.cursize, 1, cls.demofile);

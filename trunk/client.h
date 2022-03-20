@@ -179,6 +179,10 @@ typedef struct
 // of each level and after teleporting.
 	vec3_t		mviewangles[2];		// during demo playback viewangles is lerped between these
 	vec3_t		viewangles;
+	// stores the last viewangles sent to the server. When recording a demo,
+	// these viewangles can be written together with the corresponding server
+	// message to avoid lag between viewangles and everything else in the demo.
+	vec3_t		serverviewangles;
 	
 	vec3_t		mvelocity[2];		// update by server, used for lean+bob (0 is newest)
 	vec3_t		velocity;		// lerped between mvelocity[0] and [1]

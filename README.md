@@ -255,6 +255,14 @@ If cl_autodemo is 2, the naming format changes to the following:
 `<mapname>_<finished_time>_<skill>_<player_name>.dem`
 If cl_autodemo is 0, there is no automatic recording.
 
+### `cl_recordserverview`
+
+Determines which viewangles to record when recording a demo.
+"0" records the current client viewangles, which may be too far ahead of what is happening in the game on high ping.
+"1" records the last viewangles that were sent to the server, which eliminates that time difference in the demo.
+The demo is then a less accurate record of what the player saw on screen while playing, but a more accurate record of what actually happened on the server.
+Default is "0".
+
 ### `cl_maxfps`
 
 Customizes the maximal fps, 72 by default.
